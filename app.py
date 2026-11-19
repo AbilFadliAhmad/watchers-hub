@@ -27,6 +27,19 @@ def login_required(view_func):
         return view_func(*args, **kwargs)
     return wrapped_view
 
+import traceback
+
+
+# =====================================================================
+# PROTEKSI ERROR HANDLER
+# =====================================================================
+@app.errorhandler(500)
+def handle_500(e):
+    return f"<pre>{traceback.format_exc()}</pre>", 500
+
+@app.errorhandler(400)
+def handle_400(e):
+    return f"<pre>{traceback.format_exc()}</pre>", 400
 
 # =====================================================================
 # RUTE UTAMA & HALAMAN 1: LOGIN (/login)
@@ -41,7 +54,7 @@ def root_redirect():
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     if session.get("hub_logged_in"):
-        return redirect(url_for("activity_page"))
+        return redirect("/activity")
 
     if request.method == "POST":
         username = (request.form.get("username") or "").strip()
@@ -52,7 +65,7 @@ def login_page():
             session.permanent = True
             session["hub_logged_in"] = True
             session["hub_user"] = username
-            return redirect(url_for("activity_page"))
+            return redirect("/activity")
 
         flash("Username atau kata sandi admin tidak sesuai.", "error")
 
