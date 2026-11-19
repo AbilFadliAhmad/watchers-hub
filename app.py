@@ -8,6 +8,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "watchers-hub-dev-secret-key-2026")
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
 ADMIN_USERNAME = os.environ.get("HUB_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("HUB_ADMIN_PASS", "watchers123")
 
@@ -43,6 +48,8 @@ def login_page():
         password = (request.form.get("password") or "").strip()
 
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session.clear()
+            session.permanent = True
             session["hub_logged_in"] = True
             session["hub_user"] = username
             return redirect(url_for("activity_page"))
