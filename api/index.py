@@ -35,7 +35,7 @@ def login_required(view_func):
 # =====================================================================
 # RUTE UTAMA & HALAMAN 1: LOGIN (/login)
 # =====================================================================
-@app.route("/")
+@app.route("/", strict_slashes=False)
 def root_redirect():
     if session.get("hub_logged_in"):
         return redirect(url_for("activity_page"))
