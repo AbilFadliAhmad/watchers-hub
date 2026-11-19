@@ -7,14 +7,15 @@ import data
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "watchers-hub-dev-secret-key-2026")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "watchers-hub-secret-key-2026-kuat"
 app.config.update(
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
-ADMIN_USERNAME = os.environ.get("HUB_ADMIN_USER", "admin")
-ADMIN_PASSWORD = os.environ.get("HUB_ADMIN_PASS", "watchers123")
+
+ADMIN_USERNAME = os.environ.get("HUB_ADMIN_USER") or "admin"
+ADMIN_PASSWORD = os.environ.get("HUB_ADMIN_PASS") or "watchers123"
 
 # =====================================================================
 # DECORATOR PROTEKSI LOGIN ADMIN
