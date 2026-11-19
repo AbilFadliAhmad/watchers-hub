@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Watchers Security — Unduh & Aktivasi Lisensi Gratis</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen flex items-center justify-center p-4">
+
+    <section class="w-full max-w-lg bg-gray-900 border border-gray-800 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6">
+        <!-- Header -->
+        <div class="space-y-1.5">
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-950 text-emerald-400 border border-emerald-500/30">
+                Free Tier • Hingga 50 Perangkat PC
+            </span>
+            <h1 class="text-xl sm:text-2xl font-bold text-white">Unduh Watchers Server &amp; Client</h1>
+            <p class="text-xs text-gray-400 leading-relaxed">
+                Daftarkan domain atau IP server lab Anda untuk mendapatkan kunci kredensial gratis (1 domain, maksimal 50 PC aktif).
+            </p>
+        </div>
+
+        <!-- Form Input Domain -->
+        <form id="license-form" onsubmit="handleGenerateLicense(event)" class="space-y-4">
+            <div>
+                <label for="domain-input" class="block text-xs font-semibold text-gray-300 mb-1.5">
+                    Domain atau Alamat Server Tujuan
+                </label>
+                <input type="text" id="domain-input" required
+                    placeholder="contoh: lab.sekolah.sch.id atau 192.168.1.10"
+                    class="w-full bg-gray-950 border border-gray-800 focus:border-indigo-500 text-sm text-gray-100 rounded-xl px-4 py-2.5 focus:outline-none transition">
+                <p class="text-[11px] text-gray-500 mt-1">
+                    Satu domain hanya dapat didaftarkan pada satu kredensial gratis.
+                </p>
+            </div>
+
+            <!-- Pesan Error -->
+            <div id="error-box" class="hidden rounded-xl p-3 bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs"></div>
+
+            <button type="submit" id="btn-submit"
+                class="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white font-semibold text-xs rounded-xl shadow-lg shadow-indigo-950/50 transition cursor-pointer">
+                Dapatkan Kredensial Gratis &amp; Tautan Unduhan
+            </button>
+        </form>
+
+        <!-- Hasil Kredensial & Tombol Download (Muncul Setelah Sukses) -->
+        <div id="result-box" class="hidden bg-gray-950 border border-emerald-500/30 rounded-xl p-4 space-y-3">
+            <div class="flex items-center justify-between">
+                <span class="text-[11px] font-bold uppercase tracking-wider text-emerald-400">Kredensial Berhasil Dibuat</span>
+                <span class="text-[11px] font-mono text-gray-400">Kuota: 50 PC</span>
+            </div>
+
+            <!-- Kotak Salin Credential Key -->
+            <div class="flex items-center justify-between gap-2 bg-gray-900 border border-gray-800 rounded-lg px-3 py-2">
+                <code id="generated-key" class="text-xs sm:text-sm font-mono font-bold text-indigo-300 select-all">
+                    WCH-XXXX-XXXX-XXXX
+                </code>
+                <button type="button" onclick="copyCredentialKey()" id="btn-copy"
+                    class="px-2.5 py-1 rounded-md bg-gray-800 hover:bg-gray-700 text-[11px] font-medium text-gray-200 transition cursor-pointer">
+                    Salin
+                </button>
+            </div>
+
+            <p class="text-[11px] text-amber-300/90 leading-relaxed">
+                Simpan kunci ini! Masukkan kunci tersebut saat pertama kali menjalankan <strong>Watchers Server</strong> pada domain <strong id="bound-domain-label" class="text-white"></strong>.
+            </p>
+
+            <!-- Tombol Unduh Installer -->
+            <div class="pt-2 border-t border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <a href="https://github.com/username/watchers/releases/latest/download/WatchersServer.zip"
+                   class="inline-flex items-center justify-center px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition">
+                    Unduh Watchers Server
+                </a>
+                <a href="https://github.com/username/watchers/releases/latest/download/WatchersAgent-v1.5.0-x64.exe"
+                   class="inline-flex items-center justify-center px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold border border-gray-700 transition">
+                    Unduh Client Agent (.exe)
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <script>
+        async function handleGenerateLicense(event) {
+            event.preventDefault();
+
+            const domainInput = document.getElementById("domain-input");
+            const btnSubmit = document.getElementById("btn-submit");
+            const errorBox = document.getElementById("error-box");
+            const resultBox = document.getElementById("result-box");
+
+            const domain = domainInput.value.trim().toLowerCase();
+            if (!domain) return;
+
+            errorBox.classList.add("hidden");
+            resultBox.classList.add("hidden");
+            btnSubmit.disabled = true;
+            btnSubmit.textContent = "Membuat kredensial...";
+
+            try {
+                // Memanggil endpoint Python di Vercel (/api/generate)
+                const response = await fetch("/api/generate", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ domain })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.message || "Gagal membuat kredensial.");
+                }
+
+                document.getElementById("generated-key").textContent = data.credential_key;
+                document.getElementById("bound-domain-label").textContent = data.domain;
+                resultBox.classList.remove("hidden");
+            } catch (err) {
+                errorBox.textContent = err.message;
+                errorBox.classList.remove("hidden");
+            } finally {
+                btnSubmit.disabled = false;
+                btnSubmit.textContent = "Dapatkan Kredensial Gratis & Tautan Unduhan";
+            }
+        }
+
+        function copyCredentialKey() {
+            const keyText = document.getElementById("generated-key").textContent.trim();
+            const btnCopy = document.getElementById("btn-copy");
+            navigator.clipboard.writeText(keyText);
+            btnCopy.textContent = "Tersalin!";
+            setTimeout(() => { btnCopy.textContent = "Salin"; }, 2000);
+        }
+    </script>
+</body>
+</html>

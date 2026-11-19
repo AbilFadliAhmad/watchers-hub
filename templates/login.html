@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Masuk — Watchers Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen flex items-center justify-center p-4">
+
+    <div class="w-full max-w-sm bg-gray-900 border border-gray-800 rounded-2xl p-6 sm:p-7 shadow-2xl space-y-6">
+        <div class="text-center space-y-2">
+            <div class="w-11 h-11 rounded-2xl bg-indigo-950 border border-indigo-500/30 flex items-center justify-center text-indigo-400 mx-auto">
+                <i data-lucide="shield-check" class="w-5 h-5"></i>
+            </div>
+            <div>
+                <h1 class="text-lg font-bold text-white">Watchers Hub</h1>
+                <p class="text-xs text-gray-400">Masuk ke Pusat Kendali Lisensi &amp; Aktivitas</p>
+            </div>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="rounded-xl p-3 bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                        <i data-lucide="alert-circle" class="w-4 h-4 shrink-0"></i>
+                        <span>{{ message }}</span>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <form method="POST" action="{{ url_for('login_page') }}" class="space-y-4">
+            <div>
+                <label for="username" class="block text-xs font-semibold text-gray-300 mb-1.5">Username Admin</label>
+                <input type="text" id="username" name="username" required autofocus
+                    placeholder="admin"
+                    class="w-full bg-gray-950 border border-gray-800 focus:border-indigo-500 text-sm text-gray-100 rounded-xl px-3.5 py-2.5 focus:outline-none transition">
+            </div>
+
+            <div>
+                <label for="password" class="block text-xs font-semibold text-gray-300 mb-1.5">Kata Sandi</label>
+                <input type="password" id="password" name="password" required
+                    placeholder="••••••••"
+                    class="w-full bg-gray-950 border border-gray-800 focus:border-indigo-500 text-sm text-gray-100 rounded-xl px-3.5 py-2.5 focus:outline-none transition">
+            </div>
+
+            <button type="submit"
+                class="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-lg shadow-indigo-950/50 transition cursor-pointer">
+                Masuk ke Dasbor
+            </button>
+        </form>
+
+        <p class="text-center text-[11px] text-gray-500">
+            Default uji coba: <code class="text-gray-300">admin</code> / <code class="text-gray-300">watchers123</code>
+        </p>
+    </div>
+
+    <script>
+        if (window.lucide) lucide.createIcons();
+    </script>
+</body>
+</html>
