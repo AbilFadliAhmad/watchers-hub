@@ -1156,12 +1156,12 @@ def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: 
             # 3. Catat absen harian unik WIB
             cur.execute(
                 """
-                INSERT INTO daily_activity_user (credential_id, device_id, activity_date, city)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (credential_id, device_id, activity_date)
+                INSERT INTO daily_activity_user (device_id, activity_date, city)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (device_id, activity_date)
                 DO UPDATE SET city = EXCLUDED.city
                 """,
-                (cred["id"], dev_id, today_wib, clean_city),
+                (dev_id, today_wib, clean_city),
             )
 
         conn.commit()
