@@ -506,20 +506,38 @@ def delete_credential(cred_id: int) -> bool:
     finally:
         conn.close()
 
+from zoneinfo import ZoneInfo
+
+WIB = ZoneInfo("Asia/Jakarta")
+
+
 def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: str) -> dict:
+    # Gunakan timezone Asia/Jakarta untuk semua perhitungan tanggal/waktu
+    from zoneinfo import ZoneInfo
+    WIB = ZoneInfo("Asia/Jakarta")
+
     key = (cred_key or "").strip().upper()
     domain = normalize_domain(raw_domain)
     dev_id = (device_id or "").strip()
 
     if not key or not domain or not dev_id:
-        return {"allowed": False, "status": 400, "reason": "MISSING_PARAMETERS"}
+        return {
+            "allowed": False,
+            "status": 400,
+            "reason": "MISSING_PARAMETERS",
+            "message": "Parameter credential_key, domain, dan device_id wajib diisi.",
+        }
+
+    now_wib = datetime.now(WIB)
+    today_wib = now_wib.date().isoformat()
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
+            # 1. Ambil detail credential_key + kunci baris (FOR UPDATE) cegah race condition
             cur.execute(
                 """
-                SELECT id, tier, max_domains, max_devices, is_active, expired_at
+                SELECT id, credential_key, tier, max_domains, max_devices, is_active, expired_at
                 FROM credentials
                 WHERE credential_key = %s
                 FOR UPDATE
@@ -527,85 +545,120 @@ def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: 
                 (key,),
             )
             cred = cur.fetchone()
-            if not cred or not cred["is_active"]:
+
+            if not cred:
                 conn.rollback()
-                return {"allowed": False, "status": 403, "reason": "INVALID_OR_INACTIVE_CREDENTIAL"}
+                return {
+                    "allowed": False,
+                    "status": 404,
+                    "reason": "CREDENTIAL_NOT_FOUND",
+                    "message": "Credential key tidak ditemukan di server lisensi.",
+                }
 
-            if cred["expired_at"] and cred["expired_at"] < datetime.now():
+            if not cred["is_active"]:
                 conn.rollback()
-                return {"allowed": False, "status": 403, "reason": "CREDENTIAL_EXPIRED"}
+                return {
+                    "allowed": False,
+                    "status": 403,
+                    "reason": "CREDENTIAL_INACTIVE",
+                    "message": "Credential key berstatus nonaktif / diblokir.",
+                }
 
-            # Cek apakah domain sudah terdaftar di credential_domains
-            cur.execute(
-                "SELECT credential_id FROM credential_domains WHERE domain_name = %s",
-                (domain,),
-            )
-            dom_row = cur.fetchone()
-
-            if dom_row:
-                if dom_row["credential_id"] != cred["id"]:
-                    conn.rollback()
-                    return {"allowed": False, "status": 403, "reason": "DOMAIN_BOUND_TO_OTHER_CREDENTIAL"}
-            else:
-                # Domain baru dari client: daftarkan otomatis jika kuota max_domains masih cukup
-                cur.execute(
-                    "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
-                    (cred["id"],),
-                )
-                bound_dom_count = cur.fetchone()["cnt"]
-                if bound_dom_count >= cred["max_domains"]:
+            if cred["expired_at"]:
+                exp_dt = cred["expired_at"]
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=WIB)
+                if exp_dt < now_wib:
                     conn.rollback()
                     return {
                         "allowed": False,
                         "status": 403,
-                        "reason": "DOMAIN_QUOTA_EXCEEDED",
-                        "used_domains": bound_dom_count,
-                        "max_domains": cred["max_domains"],
+                        "reason": "CREDENTIAL_EXPIRED",
+                        "message": "Masa berlaku credential key telah habis (Expired).",
                     }
 
-                cur.execute(
-                    "INSERT INTO credential_domains (credential_id, domain_name) VALUES (%s, %s)",
-                    (cred["id"], domain),
-                )
-
-            # Cek slot device_id pada credential_users
+            # 2. Verifikasi apakah domain sudah terdaftar pada credential_key ini
             cur.execute(
-                "SELECT id FROM credential_users WHERE credential_id = %s AND device_id = %s",
+                """
+                SELECT id, credential_id
+                FROM credential_domains
+                WHERE domain_name = %s
+                """,
+                (domain,),
+            )
+            dom_row = cur.fetchone()
+
+            if not dom_row:
+                conn.rollback()
+                return {
+                    "allowed": False,
+                    "status": 403,
+                    "reason": "DOMAIN_NOT_REGISTERED",
+                    "message": f"Domain '{domain}' belum terdaftar pada credential key ini.",
+                }
+
+            if dom_row["credential_id"] != cred["id"]:
+                conn.rollback()
+                return {
+                    "allowed": False,
+                    "status": 403,
+                    "reason": "DOMAIN_MISMATCH",
+                    "message": f"Domain '{domain}' terdaftar pada credential key lain.",
+                }
+
+            # 3. Cek apakah pasangan (credential_id, device_id) sudah ada di credential_users
+            cur.execute(
+                """
+                SELECT id
+                FROM credential_users
+                WHERE credential_id = %s AND device_id = %s
+                """,
                 (cred["id"], dev_id),
             )
-            existing_user = cur.fetchone()
+            existing_device = cur.fetchone()
 
             cur.execute(
-                "SELECT COUNT(*) AS cnt FROM credential_users WHERE credential_id = %s",
+                """
+                SELECT COUNT(*) AS cnt
+                FROM credential_users
+                WHERE credential_id = %s
+                """,
                 (cred["id"],),
             )
-            used_count = cur.fetchone()["cnt"]
+            used_devices = int(cur.fetchone()["cnt"])
+            max_devices = int(cred["max_devices"])
 
-            if not existing_user:
-                if used_count >= cred["max_devices"]:
+            if not existing_device:
+                # Bandingkan jumlah count dengan kuota max_devices
+                if used_devices >= max_devices:
                     conn.rollback()
                     return {
                         "allowed": False,
                         "status": 403,
                         "reason": "DEVICE_QUOTA_EXCEEDED",
-                        "used": used_count,
-                        "max": cred["max_devices"],
+                        "message": f"Kuota perangkat penuh ({used_devices}/{max_devices} PC).",
+                        "used_devices": used_devices,
+                        "max_devices": max_devices,
                     }
 
                 cur.execute(
-                    "INSERT INTO credential_users (credential_id, device_id) VALUES (%s, %s)",
+                    """
+                    INSERT INTO credential_users (credential_id, device_id)
+                    VALUES (%s, %s)
+                    """,
                     (cred["id"], dev_id),
                 )
-                used_count += 1
+                used_devices += 1
 
-            today_str = date.today().isoformat()
+            # 4. Semua lolos -> catat absen harian di daily_activity_user (1x per hari WIB)
+            clean_city = (city or "").strip() or "Unknown"
             cur.execute(
                 """
                 INSERT INTO daily_activity_user (device_id, activity_date, city)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (device_id, activity_date) DO NOTHING
                 """,
-                (dev_id, today_str, city or "Unknown"),
+                (dev_id, today_wib, clean_city),
             )
 
         conn.commit()
@@ -613,89 +666,12 @@ def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: 
             "allowed": True,
             "status": 200,
             "tier": cred["tier"],
-            "used_devices": used_count,
-            "max_devices": cred["max_devices"],
-            "city": city or "Unknown",
-        }
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-    key = (cred_key or "").strip().upper()
-    domain = normalize_domain(raw_domain)
-    dev_id = (device_id or "").strip()
-
-    if not key or not domain or not dev_id:
-        return {"allowed": False, "status": 400, "reason": "MISSING_PARAMETERS"}
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            # Kunci baris kredensial (FOR UPDATE) agar aman dari race condition saat 50 PC menyala serentak
-            cur.execute(
-                "SELECT id, max_devices, is_active FROM credentials WHERE credential_key = %s FOR UPDATE",
-                (key,),
-            )
-            cred = cur.fetchone()
-            if not cred or not cred["is_active"]:
-                conn.rollback()
-                return {"allowed": False, "status": 403, "reason": "INVALID_OR_INACTIVE_CREDENTIAL"}
-
-            cur.execute(
-                "SELECT 1 FROM credential_domains WHERE credential_id = %s AND domain_name = %s",
-                (cred["id"], domain),
-            )
-            if not cur.fetchone():
-                conn.rollback()
-                return {"allowed": False, "status": 403, "reason": "DOMAIN_MISMATCH"}
-
-            cur.execute(
-                "SELECT id FROM credential_users WHERE credential_id = %s AND device_id = %s",
-                (cred["id"], dev_id),
-            )
-            existing_user = cur.fetchone()
-
-            cur.execute(
-                "SELECT COUNT(*) AS cnt FROM credential_users WHERE credential_id = %s",
-                (cred["id"],),
-            )
-            used_count = cur.fetchone()["cnt"]
-
-            if not existing_user:
-                if used_count >= cred["max_devices"]:
-                    conn.rollback()
-                    return {
-                        "allowed": False,
-                        "status": 403,
-                        "reason": "DEVICE_QUOTA_EXCEEDED",
-                        "used": used_count,
-                        "max": cred["max_devices"],
-                    }
-
-                cur.execute(
-                    "INSERT INTO credential_users (credential_id, device_id) VALUES (%s, %s)",
-                    (cred["id"], dev_id),
-                )
-                used_count += 1
-
-            today_str = date.today().isoformat()
-            cur.execute(
-                """
-                INSERT INTO daily_activity_user (device_id, activity_date, city)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (device_id, activity_date) DO NOTHING
-                """,
-                (dev_id, today_str, city or "Unknown"),
-            )
-
-        conn.commit()
-        return {
-            "allowed": True,
-            "status": 200,
-            "used_devices": used_count,
-            "max_devices": cred["max_devices"],
-            "city": city or "Unknown",
+            "domain": domain,
+            "device_id": dev_id,
+            "used_devices": used_devices,
+            "max_devices": max_devices,
+            "activity_date": today_wib,
+            "city": clean_city,
         }
     except Exception:
         conn.rollback()
