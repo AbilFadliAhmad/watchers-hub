@@ -8,7 +8,7 @@
             <div>
                 <h2 class="text-base font-bold text-white">Log Aktivitas Harian Perangkat</h2>
                 <p class="text-xs text-gray-400 mt-0.5">
-                    Rekap kehadiran unik per perangkat (<code>device_id</code> + <code>activity_date</code>).
+                    Rekap kehadiran unik per perangkat.
                 </p>
             </div>
 
@@ -75,7 +75,6 @@
                     <th class="px-5 py-3">Tanggal Aktivitas</th>
                     <th class="px-5 py-3">Device ID (UUID)</th>
                     <th class="px-5 py-3">Kota (GeoIP)</th>
-                    <th class="px-5 py-3">Waktu Tercatat</th>
                 </tr>
             </thead>
             <tbody class="divide-y divide-gray-800/80">
@@ -89,7 +88,6 @@
                             {{ act.city }}
                         </span>
                     </td>
-                    <td class="px-5 py-3.5 font-mono text-[11px] text-gray-400">{{ act.created_at }}</td>
                 </tr>
                 {% else %}
                 <tr>
