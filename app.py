@@ -116,32 +116,27 @@ def credentials_page():
     if request.method == "POST":
         action = request.form.get("action")
         if action == "create":
-            tier = request.form.get("tier", "free")
-            duration = request.form.get("duration", "1m")
-            max_domains = max(1, int(request.form.get("max_domains") or 1))
-            max_devices = max(1, int(request.form.get("max_devices") or 50))
             res = data.create_credential(
-                tier=tier,
-                duration_code=duration,
-                max_domains=max_domains,
-                max_devices=max_devices,
+                email=request.form.get("email", ""),
+                tier=request.form.get("tier", "free"),
+                duration_code=request.form.get("duration", "1m"),
+                max_domains=int(request.form.get("max_domains", 1)),
+                max_devices=int(request.form.get("max_devices", 50)),
             )
-            if res["success"]:
-                flash(
-                    f"Kredensial {res['credential_key']} ({res['tier'].upper()}) berhasil dibuat — Masa aktif: {res['expired_at']}.",
-                    "success",
-                )
-
+            if not res.get("success"):
+                flash(res.get("message", "Email tidak valid."), "error")
+            
         elif action == "edit":
-            cred_id = int(request.form.get("credential_id") or 0)
-            tier = request.form.get("tier", "free")
-            duration = request.form.get("duration", "keep")
-            max_domains = max(1, int(request.form.get("max_domains") or 1))
-            max_devices = max(1, int(request.form.get("max_devices") or 50))
-            if data.update_credential(cred_id, tier, duration, max_domains, max_devices):
-                flash("Data kredensial berhasil diperbarui.", "success")
-            else:
-                flash("Gagal memperbarui kredensial.", "error")
+            ok = data.update_credential(
+                cred_id=int(request.form.get("credential_id")),
+                email=request.form.get("email", ""),
+                tier=request.form.get("tier", "free"),
+                duration_code=request.form.get("duration", "keep"),
+                max_domains=int(request.form.get("max_domains", 1)),
+                max_devices=int(request.form.get("max_devices", 50)),
+            )
+            if not ok:
+                flash("Gagal memperbarui kredensial. Pastikan email valid dan kuota minimal 1.", "error")
 
         elif action == "toggle":
             cred_id = int(request.form.get("credential_id") or 0)

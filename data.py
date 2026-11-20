@@ -235,6 +235,7 @@ def get_all_credentials(search_query: str = "") -> list:
         SELECT
             c.id,
             c.credential_key,
+            c.email,
             c.tier,
             c.max_domains,
             c.max_devices,
@@ -397,11 +398,20 @@ def get_all_users(search_query: str = "", cred_filter: str = "") -> list:
 # FUNGSI CRUD Credential
 # =====================================================================
 def create_credential(
+    email: str,
     tier: str = "free",
     duration_code: str = "1m",
     max_domains: int = 1,
     max_devices: int = 50,
 ) -> dict:
+    clean_email = (email or "").strip().lower()
+    if not clean_email or not EMAIL_REGEX.match(clean_email):
+        return {
+            "success": False,
+            "status": 400,
+            "message": "Alamat email wajib diisi dengan format yang valid.",
+        }
+
     clean_tier = (tier or "free").strip().lower()
     if clean_tier not in VALID_TIERS:
         clean_tier = "free"
@@ -414,19 +424,20 @@ def create_credential(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO credentials (credential_key, tier, max_domains, max_devices, is_active, expired_at)
-                VALUES (%s, %s, %s, %s, TRUE, %s)
+                INSERT INTO credentials (credential_key, email, tier, max_domains, max_devices, is_active, expired_at)
+                VALUES (%s, %s, %s, %s, %s, TRUE, %s)
                 RETURNING id
                 """,
-                (new_key, clean_tier, max_domains, max_devices, expired_at),
+                (new_key, clean_email, clean_tier, max_domains, max_devices, expired_at),
             )
-            cred_id = cur.fetchone()["id"] # type: ignore
+            cred_id = cur.fetchone()["id"]  # type: ignore
         conn.commit()
         return {
             "success": True,
             "status": 200,
             "id": cred_id,
             "credential_key": new_key,
+            "email": clean_email,
             "tier": clean_tier,
             "max_domains": max_domains,
             "max_devices": max_devices,
@@ -440,11 +451,16 @@ def create_credential(
 
 def update_credential(
     cred_id: int,
+    email: str,
     tier: str,
     duration_code: str,
     max_domains: int,
     max_devices: int,
 ) -> bool:
+    clean_email = (email or "").strip().lower()
+    if not clean_email or not EMAIL_REGEX.match(clean_email):
+        return False
+
     if max_domains < 1 or max_devices < 1:
         return False
 
@@ -459,32 +475,32 @@ def update_credential(
                 cur.execute(
                     """
                     UPDATE credentials
-                    SET tier = %s, max_domains = %s, max_devices = %s, expired_at = NULL
+                    SET email = %s, tier = %s, max_domains = %s, max_devices = %s, expired_at = NULL
                     WHERE id = %s
                     RETURNING id
                     """,
-                    (clean_tier, max_domains, max_devices, cred_id),
+                    (clean_email, clean_tier, max_domains, max_devices, cred_id),
                 )
             elif duration_code == "keep":
                 cur.execute(
                     """
                     UPDATE credentials
-                    SET tier = %s, max_domains = %s, max_devices = %s
+                    SET email = %s, tier = %s, max_domains = %s, max_devices = %s
                     WHERE id = %s
                     RETURNING id
                     """,
-                    (clean_tier, max_domains, max_devices, cred_id),
+                    (clean_email, clean_tier, max_domains, max_devices, cred_id),
                 )
             else:
                 new_exp = _calculate_expired_at(clean_tier, duration_code)
                 cur.execute(
                     """
                     UPDATE credentials
-                    SET tier = %s, max_domains = %s, max_devices = %s, expired_at = %s
+                    SET email = %s, tier = %s, max_domains = %s, max_devices = %s, expired_at = %s
                     WHERE id = %s
                     RETURNING id
                     """,
-                    (clean_tier, max_domains, max_devices, new_exp, cred_id),
+                    (clean_email, clean_tier, max_domains, max_devices, new_exp, cred_id),
                 )
             updated = cur.fetchone()
         conn.commit()
