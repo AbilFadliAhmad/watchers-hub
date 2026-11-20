@@ -86,8 +86,14 @@ def logout_action():
 @login_required
 def activity_page():
     q = request.args.get("q", "")
-    filter_date = request.args.get("date", "")
-    activities = data.get_daily_activities(search_query=q, filter_date=filter_date)
+    start_date = request.args.get("start_date", "")
+    end_date = request.args.get("end_date", "")
+
+    activities = data.get_daily_activities(
+        search_query=q,
+        start_date=start_date,
+        end_date=end_date,
+    )
     stats = data.get_summary_stats()
 
     return render_template(
@@ -96,7 +102,8 @@ def activity_page():
         activities=activities,
         stats=stats,
         q=q,
-        filter_date=filter_date,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 

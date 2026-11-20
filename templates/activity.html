@@ -3,35 +3,71 @@
 
 {% block content %}
 <section class="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-    <!-- Header & Filter -->
-    <div class="p-5 border-b border-gray-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-            <h2 class="text-base font-bold text-white">Aktivitas Harian Perangkat</h2>
-            <p class="text-xs text-gray-400 mt-0.5">
-                Rekap kehadiran unik per perangkat setiap harinya (<code>device_id</code> + <code>activity_date</code>).
-            </p>
+    <div class="p-5 border-b border-gray-800 space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+                <h2 class="text-base font-bold text-white">Log Aktivitas Harian Perangkat</h2>
+                <p class="text-xs text-gray-400 mt-0.5">
+                    Rekap kehadiran unik per perangkat (<code>device_id</code> + <code>activity_date</code>).
+                </p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-1.5">
+                <span class="text-[11px] text-gray-500 mr-1">Cepat:</span>
+                <button type="button" onclick="applyDatePreset(0)"
+                    class="px-2.5 py-1 rounded-lg bg-gray-950 hover:bg-gray-800 border border-gray-800 text-[11px] text-gray-300 transition cursor-pointer">
+                    Hari Ini
+                </button>
+                <button type="button" onclick="applyDatePreset(6)"
+                    class="px-2.5 py-1 rounded-lg bg-gray-950 hover:bg-gray-800 border border-gray-800 text-[11px] text-gray-300 transition cursor-pointer">
+                    7 Hari
+                </button>
+                <button type="button" onclick="applyDatePreset(29)"
+                    class="px-2.5 py-1 rounded-lg bg-gray-950 hover:bg-gray-800 border border-gray-800 text-[11px] text-gray-300 transition cursor-pointer">
+                    30 Hari
+                </button>
+            </div>
         </div>
 
-        <form method="GET" action="{{ url_for('activity_page') }}" class="flex flex-wrap items-center gap-2">
-            <input type="text" name="q" value="{{ q }}"
-                placeholder="Cari Device ID atau Kota..."
-                class="bg-gray-950 border border-gray-800 focus:border-indigo-500 text-xs text-gray-100 rounded-xl px-3.5 py-2 focus:outline-none">
-            <input type="date" name="date" value="{{ filter_date }}"
-                class="bg-gray-950 border border-gray-800 focus:border-indigo-500 text-xs text-gray-100 rounded-xl px-3 py-2 focus:outline-none">
-            <button type="submit"
-                class="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition cursor-pointer">
-                Filter
-            </button>
-            {% if q or filter_date %}
-            <a href="{{ url_for('activity_page') }}"
-                class="px-3 py-2 rounded-xl bg-gray-950 hover:bg-gray-800 border border-gray-800 text-gray-400 text-xs transition">
-                Reset
-            </a>
-            {% endif %}
+        <form id="activityFilterForm" method="GET" action="{{ url_for('activity_page') }}"
+              class="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end bg-gray-950/70 p-3.5 rounded-xl border border-gray-800/80">
+            <div class="sm:col-span-4">
+                <label class="block text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">Cari Perangkat / Kota</label>
+                <div class="relative">
+                    <i data-lucide="search" class="w-3.5 h-3.5 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2"></i>
+                    <input type="text" name="q" value="{{ q }}"
+                        placeholder="Device ID atau nama kota..."
+                        class="w-full bg-gray-900 border border-gray-800 focus:border-indigo-500 text-xs text-gray-100 rounded-xl pl-8 pr-3 py-2 focus:outline-none">
+                </div>
+            </div>
+
+            <div class="sm:col-span-3">
+                <label for="startDateInput" class="block text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">Tanggal Mulai</label>
+                <input type="date" id="startDateInput" name="start_date" value="{{ start_date }}"
+                    class="w-full bg-gray-900 border border-gray-800 focus:border-indigo-500 text-xs text-gray-100 rounded-xl px-3 py-2 focus:outline-none">
+            </div>
+
+            <div class="sm:col-span-3">
+                <label for="endDateInput" class="block text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">Tanggal Akhir</label>
+                <input type="date" id="endDateInput" name="end_date" value="{{ end_date }}"
+                    class="w-full bg-gray-900 border border-gray-800 focus:border-indigo-500 text-xs text-gray-100 rounded-xl px-3 py-2 focus:outline-none">
+            </div>
+
+            <div class="sm:col-span-2 flex items-center gap-1.5">
+                <button type="submit"
+                    class="flex-1 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition cursor-pointer">
+                    Terapkan
+                </button>
+                {% if q or start_date or end_date %}
+                <a href="{{ url_for('activity_page') }}" title="Reset Filter"
+                    class="px-2.5 py-2 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-400 hover:text-white text-xs transition">
+                    <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+                </a>
+                {% endif %}
+            </div>
         </form>
     </div>
 
-    <!-- Tabel Daily Activity -->
     <div class="overflow-x-auto">
         <table class="w-full text-left text-xs">
             <thead class="bg-gray-950 text-gray-400 uppercase text-[10px]">
@@ -58,7 +94,7 @@
                 {% else %}
                 <tr>
                     <td colspan="4" class="px-5 py-8 text-center text-gray-500">
-                        Belum ada data aktivitas harian yang cocok dengan filter.
+                        Belum ada data aktivitas harian yang cocok dengan rentang filter.
                     </td>
                 </tr>
                 {% endfor %}
@@ -66,4 +102,23 @@
         </table>
     </div>
 </section>
+
+<script>
+    function formatLocalISO(dateObj) {
+        const y = dateObj.getFullYear();
+        const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+        const d = String(dateObj.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
+
+    function applyDatePreset(daysBack) {
+        const end = new Date();
+        const start = new Date();
+        start.setDate(end.getDate() - daysBack);
+
+        document.getElementById('startDateInput').value = formatLocalISO(start);
+        document.getElementById('endDateInput').value = formatLocalISO(end);
+        document.getElementById('activityFilterForm').submit();
+    }
+</script>
 {% endblock %}

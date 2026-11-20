@@ -29,7 +29,6 @@ def get_db_connection():
         raise RuntimeError("Environment variable DATABASE_URL belum dikonfigurasi.")
     return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
 
-
 def normalize_domain(raw_domain: str) -> str:
     d = (raw_domain or "").strip().lower()
     for prefix in ("https://", "http://"):
@@ -37,14 +36,12 @@ def normalize_domain(raw_domain: str) -> str:
             d = d[len(prefix):]
     return d.split("/")[0].strip()
 
-
 def _format_ts(val) -> str:
     if val is None:
         return "-"
     if hasattr(val, "strftime"):
         return val.strftime("%Y-%m-%d %H:%M:%S")
     return str(val)
-
 
 # =====================================================================
 # FUNGSI PEMROSESAN UNTUK HALAMAN DASBOR
@@ -76,15 +73,31 @@ def get_summary_stats() -> dict:
     finally:
         conn.close()
 
+def get_daily_activities(
+    search_query: str = "",
+    start_date: str = "",
+    end_date: str = "",
+) -> list:
+    q = (search_query or "").strip().lower()
+    s_date = (start_date or "").strip()
+    e_date = (end_date or "").strip()
 
-def get_daily_activities(search_query: str = "", filter_date: str = "") -> list:
-    q = search_query.strip().lower()
+    # Tukar otomatis jika pengguna memilih start_date > end_date
+    if s_date and e_date and s_date > e_date:
+        s_date, e_date = e_date, s_date
+
     conditions = []
     params = []
 
-    if filter_date:
-        conditions.append("activity_date = %s")
-        params.append(filter_date)
+    if s_date and e_date:
+        conditions.append("activity_date BETWEEN %s AND %s")
+        params.extend([s_date, e_date])
+    elif s_date:
+        conditions.append("activity_date >= %s")
+        params.append(s_date)
+    elif e_date:
+        conditions.append("activity_date <= %s")
+        params.append(e_date)
 
     if q:
         conditions.append("(LOWER(device_id) LIKE %s OR LOWER(COALESCE(city, '')) LIKE %s)")
@@ -114,6 +127,56 @@ def get_daily_activities(search_query: str = "", filter_date: str = "") -> list:
     finally:
         conn.close()
 
+def get_top_cities_last_30_days() -> dict:
+    """
+    Mengambil data 30 hari terakhir (termasuk hari ini), mengelompokkan berdasarkan kota,
+    mengambil Top 5 kota dengan rata-rata harian tertinggi, dan menentukan #1 tertinggi.
+    """
+    today = date.today()
+    start_30d = today - timedelta(days=29)
+
+    sql = """
+        SELECT
+            COALESCE(NULLIF(TRIM(city), ''), 'Unknown') AS city,
+            COUNT(*) AS total_activities,
+            COUNT(DISTINCT device_id) AS unique_devices,
+            COUNT(DISTINCT activity_date) AS active_days,
+            ROUND(COUNT(*)::numeric / 30.0, 2) AS avg_daily_30d,
+            ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT activity_date), 0), 2) AS avg_per_active_day
+        FROM daily_activity_user
+        WHERE activity_date BETWEEN %s AND %s
+        GROUP BY COALESCE(NULLIF(TRIM(city), ''), 'Unknown')
+        ORDER BY avg_daily_30d DESC, total_activities DESC
+        LIMIT 5
+    """
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (start_30d.isoformat(), today.isoformat()))
+            rows = cur.fetchall()
+
+            top_5 = []
+            for idx, row in enumerate(rows, start=1):
+                top_5.append({
+                    "rank": idx,
+                    "city": row["city"],
+                    "total_activities": int(row["total_activities"]),
+                    "unique_devices": int(row["unique_devices"]),
+                    "active_days": int(row["active_days"]),
+                    "avg_daily_30d": float(row["avg_daily_30d"]),
+                    "avg_per_active_day": float(row["avg_per_active_day"] or 0),
+                })
+
+            highest_city = top_5[0] if top_5 else None
+            return {
+                "period_start": start_30d.isoformat(),
+                "period_end": today.isoformat(),
+                "top_5": top_5,
+                "highest_avg_city": highest_city,
+            }
+    finally:
+        conn.close()
 
 def get_all_credentials(search_query: str = "") -> list:
     q = search_query.strip().lower()
@@ -214,7 +277,6 @@ def update_credential_limits(cred_id: int, max_domains: int, max_devices: int) -
     finally:
         conn.close()
 
-
 def get_all_domains(search_query: str = "") -> list:
     q = search_query.strip().lower()
     params = []
@@ -251,7 +313,6 @@ def get_all_domains(search_query: str = "") -> list:
             ]
     finally:
         conn.close()
-
 
 def get_all_users(search_query: str = "", cred_filter: str = "") -> list:
     q = search_query.strip().lower()
@@ -295,7 +356,6 @@ def get_all_users(search_query: str = "", cred_filter: str = "") -> list:
     finally:
         conn.close()
 
-
 # =====================================================================
 # FUNGSI PEMROSESAN UNTUK API (/api/generate & /api/verify)
 # =====================================================================
@@ -323,7 +383,7 @@ def create_credential(
                 """,
                 (new_key, clean_tier, max_domains, max_devices, expired_at),
             )
-            cred_id = cur.fetchone()["id"]
+            cred_id = cur.fetchone()["id"] # type: ignore
         conn.commit()
         return {
             "success": True,
@@ -398,7 +458,6 @@ def update_credential(
     finally:
         conn.close()
 
-
 def delete_credential(cred_id: int) -> bool:
     conn = get_db_connection()
     try:
@@ -412,7 +471,6 @@ def delete_credential(cred_id: int) -> bool:
         raise
     finally:
         conn.close()
-
 
 def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: str) -> dict:
     key = (cred_key or "").strip().upper()
