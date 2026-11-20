@@ -26,6 +26,30 @@ def _calculate_expired_at(tier: str, duration_code: str):
     days = DURATION_DAYS_MAP.get(duration_code, 30)
     return datetime.now() + timedelta(days=days)
 
+def _send_otp_via_gmail(to_email: str, otp_code: str, domain: str, cred_key: str) -> None:
+    smtp_user = os.environ.get("GMAIL_SMTP_USER", "").strip()
+    smtp_pass = os.environ.get("GMAIL_SMTP_APP_PASSWORD", "").strip()
+
+    if not smtp_user or not smtp_pass:
+        raise RuntimeError("Konfigurasi GMAIL_SMTP_USER / GMAIL_SMTP_APP_PASSWORD belum diatur di server.")
+
+    msg = EmailMessage()
+    msg["Subject"] = f"[Watchers Hub] Kode OTP Pemutusan Domain: {otp_code}"
+    msg["From"] = f"Watchers Hub Security <{smtp_user}>"
+    msg["To"] = to_email
+    msg.set_content(
+        f"Halo,\n\n"
+        f"Anda meminta pemutusan tautan lama dan pemindahan domain '{domain}' ke Credential Key {cred_key}.\n\n"
+        f"Kode Verifikasi OTP Anda: {otp_code}\n"
+        f"Kode ini berlaku selama 10 menit dan hanya dapat digunakan satu kali.\n\n"
+        f"Jika Anda tidak merasa melakukan permintaan ini, abaikan email ini.\n"
+        f"— Watchers Hub"
+    )
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as smtp:
+        smtp.login(smtp_user, smtp_pass)
+        smtp.send_message(msg)
+
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -528,25 +552,20 @@ def delete_credential(cred_id: int) -> bool:
 # =====================================================================
 # FUNGSI PEMROSESAN DOMAIN
 # =====================================================================
-def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -> dict:
+def bind_domain_to_credential(cred_key: str, raw_domain: str) -> dict:
     key = (cred_key or "").strip().upper()
     domain = normalize_domain(raw_domain)
-    clean_email = (email or "").strip().lower()
 
     if not key or not domain:
         return {"success": False, "status": 400, "message": "Credential Key dan Domain wajib diisi."}
-
-    if clean_email and not EMAIL_REGEX.match(clean_email):
-        return {"success": False, "status": 400, "message": "Format alamat email tidak valid."}
 
     now_wib = datetime.now(WIB)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # 1. Kunci & ambil detail credential tujuan
             cur.execute(
                 """
-                SELECT id, credential_key, tier, max_domains, is_active, expired_at, email
+                SELECT id, credential_key, max_domains, is_active, expired_at
                 FROM credentials
                 WHERE credential_key = %s
                 FOR UPDATE
@@ -570,7 +589,6 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -
                     conn.rollback()
                     return {"success": False, "status": 403, "message": "Masa berlaku Credential Key sudah habis."}
 
-            # 2. Cek apakah domain sudah terdaftar di credential_domains
             cur.execute(
                 """
                 SELECT cd.id, cd.credential_id, c.credential_key AS owner_key
@@ -584,13 +602,7 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -
             existing_dom = cur.fetchone()
 
             if existing_dom:
-                # Jika sudah terdaftar di credential yang sama
                 if existing_dom["credential_id"] == cred["id"]:
-                    if clean_email:
-                        cur.execute(
-                            "UPDATE credentials SET email = %s WHERE id = %s",
-                            (clean_email, cred["id"]),
-                        )
                     conn.commit()
                     return {
                         "success": True,
@@ -598,10 +610,9 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -
                         "already_bound": True,
                         "domain": domain,
                         "credential_key": cred["credential_key"],
-                        "message": f"Domain '{domain}' sudah aktif pada Credential Key ini.",
+                        "message": f"Domain '{domain}' sudah terhubung dengan Credential Key ini.",
                     }
 
-                # Jika domain sudah didaftarkan oleh orang/lisensi lain -> kirim sinyal conflict
                 conn.rollback()
                 masked_owner = existing_dom["owner_key"][:8] + "****"
                 return {
@@ -609,11 +620,9 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -
                     "status": 409,
                     "conflict": True,
                     "domain": domain,
-                    "owner_hint": masked_owner,
-                    "message": f"Domain '{domain}' sudah terikat pada lisensi lain ({masked_owner}). Apakah Anda ingin memutuskan tautan lama dan memindahkannya?",
+                    "message": f"Domain '{domain}' sudah tertaut pada lisensi lain ({masked_owner}). Masukkan alamat email valid untuk mengirim kode OTP pemutusan tautan.",
                 }
 
-            # 3. Domain belum terdaftar -> cek kuota max_domains milik credential
             cur.execute(
                 "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
                 (cred["id"],),
@@ -629,19 +638,10 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -
                     "message": f"Kuota domain penuh ({used_domains}/{max_domains} domain).",
                 }
 
-            # 4. Simpan domain baru (dan email jika disertakan)
             cur.execute(
-                """
-                INSERT INTO credential_domains (credential_id, domain_name)
-                VALUES (%s, %s)
-                """,
+                "INSERT INTO credential_domains (credential_id, domain_name) VALUES (%s, %s)",
                 (cred["id"], domain),
             )
-            if clean_email:
-                cur.execute(
-                    "UPDATE credentials SET email = %s WHERE id = %s",
-                    (clean_email, cred["id"]),
-                )
 
         conn.commit()
         return {
@@ -649,8 +649,6 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -
             "status": 200,
             "domain": domain,
             "credential_key": cred["credential_key"],
-            "used_domains": used_domains + 1,
-            "max_domains": max_domains,
             "message": f"Domain '{domain}' berhasil didaftarkan ke lisensi.",
         }
     except Exception:
@@ -659,6 +657,191 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -
     finally:
         conn.close()
 
+
+def request_domain_transfer_otp(cred_key: str, raw_domain: str, email: str) -> dict:
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    clean_email = (email or "").strip().lower()
+
+    if not key or not domain:
+        return {"success": False, "status": 400, "message": "Credential Key dan Domain wajib diisi."}
+
+    if not clean_email or not EMAIL_REGEX.match(clean_email):
+        return {"success": False, "status": 400, "message": "Alamat email tidak valid."}
+
+    init_otp_table()
+    now_wib = datetime.now(WIB)
+    expired_at = now_wib + timedelta(minutes=10)
+    otp_code = f"{secrets.randbelow(1000000):06d}"
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Validasi credential tujuan aktif
+            cur.execute(
+                """
+                SELECT id, email, is_active, expired_at
+                FROM credentials
+                WHERE credential_key = %s
+                """,
+                (key,),
+            )
+            target_cred = cur.fetchone()
+            if not target_cred or not target_cred["is_active"]:
+                return {"success": False, "status": 403, "message": "Credential Key tujuan tidak valid atau nonaktif."}
+
+            if target_cred["expired_at"]:
+                exp_dt = target_cred["expired_at"]
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=WIB)
+                if exp_dt < now_wib:
+                    return {"success": False, "status": 403, "message": "Credential Key tujuan sudah kedaluwarsa."}
+
+            # Nonaktifkan OTP lama yang belum terpakai untuk kombinasi yang sama
+            cur.execute(
+                """
+                UPDATE domain_transfer_otps
+                SET is_used = TRUE
+                WHERE credential_key = %s AND domain_name = %s AND email = %s AND is_used = FALSE
+                """,
+                (key, domain, clean_email),
+            )
+
+            # Simpan OTP baru (berlaku 10 menit)
+            cur.execute(
+                """
+                INSERT INTO domain_transfer_otps (credential_key, domain_name, email, otp_code, expired_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (key, domain, clean_email, otp_code, expired_at),
+            )
+
+        # Kirim OTP lewat Gmail SMTP sebelum commit transaksi
+        _send_otp_via_gmail(clean_email, otp_code, domain, key)
+        conn.commit()
+
+        return {
+            "success": True,
+            "status": 200,
+            "message": f"Kode OTP 6 digit telah dikirim ke {clean_email} (berlaku 10 menit).",
+        }
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "status": 500, "message": f"Gagal mengirim OTP: {e}"}
+    finally:
+        conn.close()
+
+
+def verify_otp_and_transfer_domain(cred_key: str, raw_domain: str, email: str, otp_code: str) -> dict:
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    clean_email = (email or "").strip().lower()
+    clean_otp = (otp_code or "").strip()
+
+    if not key or not domain or not clean_email or len(clean_otp) != 6:
+        return {"success": False, "status": 400, "message": "Data verifikasi OTP tidak lengkap."}
+
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 1. Kunci & cek OTP terakhir yang valid
+            cur.execute(
+                """
+                SELECT id, otp_code, expired_at
+                FROM domain_transfer_otps
+                WHERE credential_key = %s
+                  AND domain_name = %s
+                  AND email = %s
+                  AND is_used = FALSE
+                ORDER BY id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (key, domain, clean_email),
+            )
+            otp_row = cur.fetchone()
+            if not otp_row:
+                conn.rollback()
+                return {"success": False, "status": 400, "message": "Kode OTP tidak ditemukan atau sudah digunakan."}
+
+            otp_exp = otp_row["expired_at"]
+            if otp_exp.tzinfo is None:
+                otp_exp = otp_exp.replace(tzinfo=WIB)
+            if otp_exp < now_wib:
+                conn.rollback()
+                return {"success": False, "status": 400, "message": "Kode OTP sudah kedaluwarsa. Silakan kirim ulang OTP."}
+
+            if otp_row["otp_code"] != clean_otp:
+                conn.rollback()
+                return {"success": False, "status": 400, "message": "Kode OTP salah."}
+
+            # Tandai OTP sudah terpakai
+            cur.execute("UPDATE domain_transfer_otps SET is_used = TRUE WHERE id = %s", (otp_row["id"],))
+
+            # 2. Kunci credential tujuan & cek kuota domain
+            cur.execute(
+                """
+                SELECT id, credential_key, max_domains, is_active, expired_at
+                FROM credentials
+                WHERE credential_key = %s
+                FOR UPDATE
+                """,
+                (key,),
+            )
+            cred = cur.fetchone()
+            if not cred or not cred["is_active"]:
+                conn.rollback()
+                return {"success": False, "status": 403, "message": "Credential Key tidak valid atau nonaktif."}
+
+            cur.execute(
+                "SELECT id, credential_id FROM credential_domains WHERE domain_name = %s FOR UPDATE",
+                (domain,),
+            )
+            existing_dom = cur.fetchone()
+
+            if not existing_dom or existing_dom["credential_id"] != cred["id"]:
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
+                    (cred["id"],),
+                )
+                used_domains = int(cur.fetchone()["cnt"])
+                if used_domains >= int(cred["max_domains"]):
+                    conn.rollback()
+                    return {
+                        "success": False,
+                        "status": 403,
+                        "message": f"Kuota domain pada lisensi ini penuh ({used_domains}/{cred['max_domains']}).",
+                    }
+
+            # 3. Putuskan dari lisensi lama, simpan email terverifikasi ke credentials, dan tautkan domain
+            cur.execute("UPDATE credentials SET email = %s WHERE id = %s", (clean_email, cred["id"]))
+
+            if existing_dom:
+                cur.execute(
+                    "UPDATE credential_domains SET credential_id = %s WHERE id = %s",
+                    (cred["id"], existing_dom["id"]),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO credential_domains (credential_id, domain_name) VALUES (%s, %s)",
+                    (cred["id"], domain),
+                )
+
+        conn.commit()
+        return {
+            "success": True,
+            "status": 200,
+            "domain": domain,
+            "credential_key": cred["credential_key"],
+            "message": f"Verifikasi OTP berhasil! Domain '{domain}' kini terhubung ke lisensi Anda.",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+        
 def transfer_domain_with_email(cred_key: str, raw_domain: str, email: str) -> dict:
     """Memutuskan domain dari lisensi lama, menyimpan email pemilik baru ke credentials, dan menautkan domain."""
     key = (cred_key or "").strip().upper()

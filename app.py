@@ -249,7 +249,49 @@ def api_bind_domain():
         res = data.bind_domain_to_credential(
             cred_key=body.get("credential_key", ""),
             raw_domain=body.get("domain", ""),
+        )
+        status_code = res.pop("status", 200)
+        resp = jsonify(res)
+        resp.status_code = status_code
+
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
+
+
+@app.route("/api/request-transfer-otp", methods=["POST", "OPTIONS"])
+def api_request_transfer_otp():
+    if request.method == "OPTIONS":
+        resp = jsonify({"ok": True})
+    else:
+        body = request.get_json(silent=True) or {}
+        res = data.request_domain_transfer_otp(
+            cred_key=body.get("credential_key", ""),
+            raw_domain=body.get("domain", ""),
             email=body.get("email", ""),
+        )
+        status_code = res.pop("status", 200)
+        resp = jsonify(res)
+        resp.status_code = status_code
+
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
+
+
+@app.route("/api/transfer-domain", methods=["POST", "OPTIONS"])
+def api_transfer_domain():
+    if request.method == "OPTIONS":
+        resp = jsonify({"ok": True})
+    else:
+        body = request.get_json(silent=True) or {}
+        res = data.verify_otp_and_transfer_domain(
+            cred_key=body.get("credential_key", ""),
+            raw_domain=body.get("domain", ""),
+            email=body.get("email", ""),
+            otp_code=body.get("otp_code", ""),
         )
         status_code = res.pop("status", 200)
         resp = jsonify(res)
