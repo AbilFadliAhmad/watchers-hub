@@ -1146,17 +1146,12 @@ def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: 
                     }
                 cur.execute(
                     """
-                    INSERT INTO credential_users (credential_id, device_id, last_seen_at)
+                    INSERT INTO credential_users (credential_id, device_id)
                     VALUES (%s, %s, %s)
                     """,
-                    (cred["id"], dev_id, now_wib),
+                    (cred["id"], dev_id),
                 )
                 used_devices += 1
-            else:
-                cur.execute(
-                    "UPDATE credential_users SET last_seen_at = %s WHERE id = %s",
-                    (now_wib, user_row["id"]),
-                )
 
             # 3. Catat absen harian unik WIB
             cur.execute(

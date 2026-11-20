@@ -319,7 +319,6 @@ def api_transfer_domain():
         res = data.verify_otp_and_transfer_domain(
             cred_key=body.get("credential_key", ""),
             raw_domain=body.get("domain", ""),
-            email=body.get("email", ""),
             otp_code=body.get("otp_code", ""),
         )
         status_code = res.pop("status", 200)
