@@ -127,54 +127,88 @@ def get_daily_activities(
     finally:
         conn.close()
 
-def get_top_cities_last_30_days() -> dict:
-    """
-    Mengambil data 30 hari terakhir (termasuk hari ini), mengelompokkan berdasarkan kota,
-    mengambil Top 5 kota dengan rata-rata harian tertinggi, dan menentukan #1 tertinggi.
-    """
+def get_public_telemetry_14d() -> dict:
     today = date.today()
-    start_30d = today - timedelta(days=29)
+    start_date = today - timedelta(days=13)
 
     sql = """
         SELECT
+            activity_date::text AS act_date,
             COALESCE(NULLIF(TRIM(city), ''), 'Unknown') AS city,
-            COUNT(*) AS total_activities,
-            COUNT(DISTINCT device_id) AS unique_devices,
-            COUNT(DISTINCT activity_date) AS active_days,
-            ROUND(COUNT(*)::numeric / 30.0, 2) AS avg_daily_30d,
-            ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT activity_date), 0), 2) AS avg_per_active_day
+            COUNT(*) AS device_count
         FROM daily_activity_user
         WHERE activity_date BETWEEN %s AND %s
-        GROUP BY COALESCE(NULLIF(TRIM(city), ''), 'Unknown')
-        ORDER BY avg_daily_30d DESC, total_activities DESC
-        LIMIT 5
+        GROUP BY activity_date, COALESCE(NULLIF(TRIM(city), ''), 'Unknown')
+        ORDER BY activity_date ASC, device_count DESC
     """
 
+    month_names = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, (start_30d.isoformat(), today.isoformat()))
+            cur.execute(sql, (start_date.isoformat(), today.isoformat()))
             rows = cur.fetchall()
 
-            top_5 = []
-            for idx, row in enumerate(rows, start=1):
-                top_5.append({
-                    "rank": idx,
-                    "city": row["city"],
-                    "total_activities": int(row["total_activities"]),
-                    "unique_devices": int(row["unique_devices"]),
-                    "active_days": int(row["active_days"]),
-                    "avg_daily_30d": float(row["avg_daily_30d"]),
-                    "avg_per_active_day": float(row["avg_per_active_day"] or 0),
-                })
+        # Agregasi statistik per kota selama 14 hari terakhir
+        city_totals = {}
+        grouped_by_date = {}
 
-            highest_city = top_5[0] if top_5 else None
-            return {
-                "period_start": start_30d.isoformat(),
-                "period_end": today.isoformat(),
-                "top_5": top_5,
-                "highest_avg_city": highest_city,
-            }
+        for row in rows:
+            d_str = row["act_date"]
+            city_name = row["city"]
+            count = int(row["device_count"])
+
+            grouped_by_date.setdefault(d_str, []).append({
+                "city": city_name,
+                "devices": count,
+            })
+
+            if city_name not in city_totals:
+                city_totals[city_name] = {"city": city_name, "total_devices": 0, "active_days": 0}
+            city_totals[city_name]["total_devices"] += count
+            city_totals[city_name]["active_days"] += 1
+
+        # Tahap 1: Ambil Top 5 kota dengan total aktivitas terbanyak
+        top_5_most_active = sorted(
+            city_totals.values(),
+            key=lambda x: x["total_devices"],
+            reverse=True,
+        )[:5]
+
+        # Hitung rata-rata harian untuk masing-masing kandidat Top 5
+        for item in top_5_most_active:
+            item["avg_devices"] = round(item["total_devices"] / max(item["active_days"], 1), 2)
+
+        # Tahap 2: Filter dari Top 5 menjadi Top 3 berdasarkan rata-rata tertinggi
+        top_3_highest_avg = sorted(
+            top_5_most_active,
+            key=lambda x: (x["avg_devices"], x["total_devices"]),
+            reverse=True,
+        )[:3]
+        allowed_top_3_names = {item["city"] for item in top_3_highest_avg}
+
+        # Susun data 14 hari dengan regions difilter khusus Top 3 kota terpilih
+        daily_activity = []
+        for i in range(14):
+            curr_day = start_date + timedelta(days=i)
+            iso_str = curr_day.isoformat()
+            raw_regions = grouped_by_date.get(iso_str, [])
+            filtered_regions = [r for r in raw_regions if r["city"] in allowed_top_3_names]
+            total_dev = sum(r["devices"] for r in raw_regions)
+            short_label = f"{curr_day.day:02d} {month_names[curr_day.month]}"
+
+            daily_activity.append({
+                "date": short_label,
+                "full_date": "Hari Ini" if curr_day == today else f"{curr_day.day} {month_names[curr_day.month]} {curr_day.year}",
+                "total_devices": total_dev,
+                "regions": filtered_regions,
+            })
+
+        return {
+            "last_updated": datetime.now().strftime("%d %b %Y, %H:%M WIB"),
+            "top_3_cities": top_3_highest_avg,
+            "daily_activity": daily_activity,
+        }
     finally:
         conn.close()
 

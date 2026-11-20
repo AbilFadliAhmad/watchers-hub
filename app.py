@@ -236,6 +236,13 @@ def api_verify():
     status_code = res.pop("status", 200)
     return jsonify(res), status_code
 
+@app.route("/api/public/telemetry", methods=["GET"])
+def api_public_telemetry():
+    payload = data.get_public_telemetry_14d()
+    response = jsonify(payload)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return response
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8003, debug=True)
