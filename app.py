@@ -32,7 +32,7 @@ import traceback
 
 
 # =====================================================================
-# PROTEKSI ERROR HANDLER
+# ERROR HANDLER
 # =====================================================================
 @app.errorhandler(500)
 def handle_500(e):
@@ -43,15 +43,17 @@ def handle_400(e):
     return f"<pre>{traceback.format_exc()}</pre>", 400
 
 # =====================================================================
-# RUTE UTAMA & HALAMAN 1: LOGIN (/login)
+# AUTHENTICATION & SESSION
 # =====================================================================
+
+# --- Main Redirect ---
 @app.route("/", strict_slashes=False)
 def root_redirect():
     if session.get("hub_logged_in"):
         return redirect(url_for("activity_page"))
     return redirect(url_for("login_page"))
 
-
+# --- Admin Login ---
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     if session.get("hub_logged_in"):
@@ -72,15 +74,14 @@ def login_page():
 
     return render_template("login.html")
 
-
+# --- Admin Logout ---
 @app.route("/logout")
 def logout_action():
     session.clear()
     return redirect(url_for("login_page"))
 
-
 # =====================================================================
-# HALAMAN 2: DAILY ACTIVITY USER (/activity)
+# DASHBOARD & DAILY ACTIVITY
 # =====================================================================
 @app.route("/activity")
 @login_required
@@ -106,10 +107,11 @@ def activity_page():
         end_date=end_date,
     )
 
+# =====================================================================
+# CREDENTIAL MANAGEMENT
+# =====================================================================
 
-# =====================================================================
-# HALAMAN 3: CREDENTIALS (/credentials)
-# =====================================================================
+# --- Credential CRUD ---
 @app.route("/credentials", methods=["GET", "POST"])
 @login_required
 def credentials_page():
@@ -162,7 +164,26 @@ def credentials_page():
         q=q,
     )
 
+# --- Credential Status Check --
+@app.route("/api/check-credential", methods=["POST", "OPTIONS"])
+def api_check_credential():
+    if request.method == "OPTIONS":
+        resp = jsonify({"ok": True})
+    else:
+        body = request.get_json(silent=True) or {}
+        res = data.check_credential_status(
+            cred_key=body.get("credential_key", ""),
+        )
+        status_code = res.pop("status", 200)
+        resp = jsonify(res)
+        resp.status_code = status_code
 
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
+
+# --- Credential Generator ---
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     body = request.get_json(silent=True) or {}
@@ -176,8 +197,9 @@ def api_generate():
     return jsonify(res), status_code
 
 # =====================================================================
-# HALAMAN 4: CREDENTIAL DOMAINS (/domains)
+# CREDENTIAL DOMAINS & USERS MANAGEMENT
 # =====================================================================
+
 @app.route("/domains")
 @login_required
 def domains_page():
@@ -193,10 +215,6 @@ def domains_page():
         q=q,
     )
 
-
-# =====================================================================
-# HALAMAN 5: CREDENTIAL USERS (/users)
-# =====================================================================
 @app.route("/users")
 @login_required
 def users_page():
@@ -217,6 +235,11 @@ def users_page():
     )
 
 
+# =====================================================================
+# DEVICE VERIFICATION & MONITORING
+# =====================================================================
+
+# --- Device Verification & Logging ---
 @app.route("/api/verify", methods=["POST"])
 def api_verify():
     body = request.get_json(silent=True) or {}
@@ -232,6 +255,7 @@ def api_verify():
     status_code = res.pop("status", 200)
     return jsonify(res), status_code
 
+# --- Public Device Telemetry ---
 @app.route("/api/public/telemetry", methods=["GET"])
 def api_public_telemetry():
     payload = data.get_public_telemetry_14d()
@@ -240,6 +264,11 @@ def api_public_telemetry():
     response.headers["Cache-Control"] = "public, max-age=60"
     return response
 
+# =============================================================================
+# DOMAIN BINDING & TRANSFER SYSTEM
+# =============================================================================
+
+# --- Bind Domain to Credential ---
 @app.route("/api/bind-domain", methods=["POST", "OPTIONS"])
 def api_bind_domain():
     if request.method == "OPTIONS":
@@ -259,7 +288,7 @@ def api_bind_domain():
     resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     return resp
 
-
+# --- Request Domain Transfer OTP ---
 @app.route("/api/request-transfer-otp", methods=["POST", "OPTIONS"])
 def api_request_transfer_otp():
     if request.method == "OPTIONS":
@@ -280,7 +309,7 @@ def api_request_transfer_otp():
     resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     return resp
 
-
+# --- Verify OTP & Transfer Domain ---
 @app.route("/api/transfer-domain", methods=["POST", "OPTIONS"])
 def api_transfer_domain():
     if request.method == "OPTIONS":
@@ -292,26 +321,6 @@ def api_transfer_domain():
             raw_domain=body.get("domain", ""),
             email=body.get("email", ""),
             otp_code=body.get("otp_code", ""),
-        )
-        status_code = res.pop("status", 200)
-        resp = jsonify(res)
-        resp.status_code = status_code
-
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    return resp
-
-@app.route("/api/transfer-domain", methods=["POST", "OPTIONS"])
-def api_transfer_domain():
-    if request.method == "OPTIONS":
-        resp = jsonify({"ok": True})
-    else:
-        body = request.get_json(silent=True) or {}
-        res = data.transfer_domain_with_email(
-            cred_key=body.get("credential_key", ""),
-            raw_domain=body.get("domain", ""),
-            email=body.get("email", ""),
         )
         status_code = res.pop("status", 200)
         resp = jsonify(res)

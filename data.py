@@ -5,6 +5,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 import re
+from email.message import EmailMessage
+import smtplib
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,12 +22,18 @@ DURATION_DAYS_MAP = {
     "1y": 365,
 }
 
-def _calculate_expired_at(tier: str, duration_code: str):
-    if tier == "premium" or duration_code == "lifetime":
-        return None
-    days = DURATION_DAYS_MAP.get(duration_code, 30)
-    return datetime.now() + timedelta(days=days)
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
 
+# --- Database Connection ---
+def get_db_connection():
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("Environment variable DATABASE_URL belum dikonfigurasi.")
+    return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+
+# --- Email & OTP Delivery ---
 def _send_otp_via_gmail(to_email: str, otp_code: str, domain: str, cred_key: str) -> None:
     smtp_user = os.environ.get("GMAIL_SMTP_USER", "").strip()
     smtp_pass = os.environ.get("GMAIL_SMTP_APP_PASSWORD", "").strip()
@@ -50,19 +58,68 @@ def _send_otp_via_gmail(to_email: str, otp_code: str, domain: str, cred_key: str
         smtp.login(smtp_user, smtp_pass)
         smtp.send_message(msg)
 
-def get_db_connection():
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        raise RuntimeError("Environment variable DATABASE_URL belum dikonfigurasi.")
-    return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+# --- Credential Validation & Expiration ---
+def _validate_credential_record(
+    cred: dict | None,
+    now_wib: datetime | None = None,
+) -> tuple[bool, str, dict]:
+    """
+    Helper tunggal untuk memvalidasi baris dict `cred` dari tabel `credentials`:
+    - Mengecek keberadaan record
+    - Mengecek status aktif (`is_active`)
+    - Mengecek masa berlaku (`expired_at` berbasis WIB)
 
+    Mengembalikan: (is_valid, expired_str, error_dict)
+    """
+    if not cred:
+        return False, "", {
+            "valid": False,
+            "allowed": False,
+            "status": 404,
+            "reason": "NOT_FOUND",
+            "message": "Credential Key tidak ditemukan di Watchers Hub.",
+        }
+
+    if not cred.get("is_active"):
+        return False, "", {
+            "valid": False,
+            "allowed": False,
+            "status": 403,
+            "reason": "INACTIVE",
+            "message": "Credential Key berstatus nonaktif / diblokir.",
+        }
+
+    ref_now = now_wib or datetime.now(WIB)
+    if cred.get("expired_at"):
+        exp_dt = cred["expired_at"]
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=WIB)
+        if exp_dt < ref_now:
+            return False, "", {
+                "valid": False,
+                "allowed": False,
+                "status": 403,
+                "reason": "EXPIRED",
+                "message": f"Masa berlaku Credential Key telah habis pada {_format_ts(exp_dt)}.",
+            }
+        expired_str = _format_ts(exp_dt)
+    else:
+        expired_str = "Selamanya"
+
+    return True, expired_str, {}
+def _calculate_expired_at(tier: str, duration_code: str):
+    if tier == "premium" or duration_code == "lifetime":
+        return None
+    days = DURATION_DAYS_MAP.get(duration_code, 30)
+    return datetime.now() + timedelta(days=days)
+
+# --- Data Formatting & Normalization ---
 def normalize_domain(raw_domain: str) -> str:
     d = (raw_domain or "").strip().lower()
     for prefix in ("https://", "http://"):
         if d.startswith(prefix):
             d = d[len(prefix):]
     return d.split("/")[0].strip()
-
 def _format_ts(val) -> str:
     if val is None:
         return "-"
@@ -70,9 +127,9 @@ def _format_ts(val) -> str:
         return val.strftime("%Y-%m-%d %H:%M:%S")
     return str(val)
 
-# =====================================================================
-# FUNGSI PEMROSESAN UNTUK HALAMAN DASBOR
-# =====================================================================
+# ============================================================
+# DASHBOARD & STATISTIK
+# ============================================================
 def get_summary_stats() -> dict:
     today_str = date.today().isoformat()
     conn = get_db_connection()
@@ -239,6 +296,9 @@ def get_public_telemetry_14d() -> dict:
     finally:
         conn.close()
 
+# ============================================================
+# MANAJEMEN CREDENTIAL
+# ============================================================
 def get_all_credentials(search_query: str = "") -> list:
     q = search_query.strip().lower()
     params = []
@@ -297,6 +357,7 @@ def get_all_credentials(search_query: str = "") -> list:
     finally:
         conn.close()
 
+# --- Credential Update Status & Information --- 
 def toggle_credential_status(cred_id: int) -> bool:
     conn = get_db_connection()
     try:
@@ -313,7 +374,6 @@ def toggle_credential_status(cred_id: int) -> bool:
         raise
     finally:
         conn.close()
-
 def update_credential_limits(cred_id: int, max_domains: int, max_devices: int) -> bool:
     if max_domains < 1 or max_devices < 1:
         return False
@@ -339,88 +399,7 @@ def update_credential_limits(cred_id: int, max_domains: int, max_devices: int) -
     finally:
         conn.close()
 
-def get_all_domains(search_query: str = "") -> list:
-    q = search_query.strip().lower()
-    params = []
-    where_clause = ""
-
-    if q:
-        where_clause = "WHERE LOWER(cd.domain_name) LIKE %s OR LOWER(c.credential_key) LIKE %s"
-        params.extend([f"%{q}%", f"%{q}%"])
-
-    sql = f"""
-        SELECT
-            cd.id,
-            cd.credential_id,
-            cd.domain_name,
-            cd.created_at,
-            c.credential_key
-        FROM credential_domains cd
-        JOIN credentials c ON c.id = cd.credential_id
-        {where_clause}
-        ORDER BY cd.id DESC
-    """
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
-            return [
-                {
-                    **row,
-                    "created_at": _format_ts(row["created_at"]),
-                }
-                for row in rows
-            ]
-    finally:
-        conn.close()
-
-def get_all_users(search_query: str = "", cred_filter: str = "") -> list:
-    q = search_query.strip().lower()
-    conditions = []
-    params = []
-
-    if cred_filter:
-        conditions.append("cu.credential_id = %s")
-        params.append(int(cred_filter))
-
-    if q:
-        conditions.append("(LOWER(cu.device_id) LIKE %s OR LOWER(c.credential_key) LIKE %s)")
-        params.extend([f"%{q}%", f"%{q}%"])
-
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"""
-        SELECT
-            cu.id,
-            cu.credential_id,
-            cu.device_id,
-            cu.created_at,
-            c.credential_key
-        FROM credential_users cu
-        JOIN credentials c ON c.id = cu.credential_id
-        {where_clause}
-        ORDER BY cu.id DESC
-    """
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
-            return [
-                {
-                    **row,
-                    "created_at": _format_ts(row["created_at"]),
-                }
-                for row in rows
-            ]
-    finally:
-        conn.close()
-
-# =====================================================================
-# FUNGSI CRUD Credential
-# =====================================================================
+# --- Credential CRUD ---
 def create_credential(
     email: str,
     tier: str = "free",
@@ -472,7 +451,6 @@ def create_credential(
         raise
     finally:
         conn.close()
-
 def update_credential(
     cred_id: int,
     email: str,
@@ -534,7 +512,6 @@ def update_credential(
         raise
     finally:
         conn.close()
-
 def delete_credential(cred_id: int) -> bool:
     conn = get_db_connection()
     try:
@@ -550,8 +527,45 @@ def delete_credential(cred_id: int) -> bool:
         conn.close()
 
 # =====================================================================
-# FUNGSI PEMROSESAN DOMAIN
+# MANAJEMEN DOMAIN
 # =====================================================================
+def get_all_domains(search_query: str = "") -> list:
+    q = search_query.strip().lower()
+    params = []
+    where_clause = ""
+
+    if q:
+        where_clause = "WHERE LOWER(cd.domain_name) LIKE %s OR LOWER(c.credential_key) LIKE %s"
+        params.extend([f"%{q}%", f"%{q}%"])
+
+    sql = f"""
+        SELECT
+            cd.id,
+            cd.credential_id,
+            cd.domain_name,
+            cd.created_at,
+            c.credential_key
+        FROM credential_domains cd
+        JOIN credentials c ON c.id = cd.credential_id
+        {where_clause}
+        ORDER BY cd.id DESC
+    """
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+            return [
+                {
+                    **row,
+                    "created_at": _format_ts(row["created_at"]),
+                }
+                for row in rows
+            ]
+    finally:
+        conn.close()
+
 def bind_domain_to_credential(cred_key: str, raw_domain: str) -> dict:
     key = (cred_key or "").strip().upper()
     domain = normalize_domain(raw_domain)
@@ -573,21 +587,15 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str) -> dict:
                 (key,),
             )
             cred = cur.fetchone()
-            if not cred:
-                conn.rollback()
-                return {"success": False, "status": 404, "message": "Credential Key tidak ditemukan."}
 
-            if not cred["is_active"]:
+            is_ok, _, err_resp = _validate_credential_record(cred, now_wib)
+            if not is_ok:
                 conn.rollback()
-                return {"success": False, "status": 403, "message": "Credential Key berstatus nonaktif / diblokir."}
-
-            if cred["expired_at"]:
-                exp_dt = cred["expired_at"]
-                if exp_dt.tzinfo is None:
-                    exp_dt = exp_dt.replace(tzinfo=WIB)
-                if exp_dt < now_wib:
-                    conn.rollback()
-                    return {"success": False, "status": 403, "message": "Masa berlaku Credential Key sudah habis."}
+                return {
+                    "success": False,
+                    "status": err_resp.get("status", 403),
+                    "message": err_resp.get("message", "Credential Key tidak valid."),
+                }
 
             cur.execute(
                 """
@@ -657,191 +665,6 @@ def bind_domain_to_credential(cred_key: str, raw_domain: str) -> dict:
     finally:
         conn.close()
 
-
-def request_domain_transfer_otp(cred_key: str, raw_domain: str, email: str) -> dict:
-    key = (cred_key or "").strip().upper()
-    domain = normalize_domain(raw_domain)
-    clean_email = (email or "").strip().lower()
-
-    if not key or not domain:
-        return {"success": False, "status": 400, "message": "Credential Key dan Domain wajib diisi."}
-
-    if not clean_email or not EMAIL_REGEX.match(clean_email):
-        return {"success": False, "status": 400, "message": "Alamat email tidak valid."}
-
-    init_otp_table()
-    now_wib = datetime.now(WIB)
-    expired_at = now_wib + timedelta(minutes=10)
-    otp_code = f"{secrets.randbelow(1000000):06d}"
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            # Validasi credential tujuan aktif
-            cur.execute(
-                """
-                SELECT id, email, is_active, expired_at
-                FROM credentials
-                WHERE credential_key = %s
-                """,
-                (key,),
-            )
-            target_cred = cur.fetchone()
-            if not target_cred or not target_cred["is_active"]:
-                return {"success": False, "status": 403, "message": "Credential Key tujuan tidak valid atau nonaktif."}
-
-            if target_cred["expired_at"]:
-                exp_dt = target_cred["expired_at"]
-                if exp_dt.tzinfo is None:
-                    exp_dt = exp_dt.replace(tzinfo=WIB)
-                if exp_dt < now_wib:
-                    return {"success": False, "status": 403, "message": "Credential Key tujuan sudah kedaluwarsa."}
-
-            # Nonaktifkan OTP lama yang belum terpakai untuk kombinasi yang sama
-            cur.execute(
-                """
-                UPDATE domain_transfer_otps
-                SET is_used = TRUE
-                WHERE credential_key = %s AND domain_name = %s AND email = %s AND is_used = FALSE
-                """,
-                (key, domain, clean_email),
-            )
-
-            # Simpan OTP baru (berlaku 10 menit)
-            cur.execute(
-                """
-                INSERT INTO domain_transfer_otps (credential_key, domain_name, email, otp_code, expired_at)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (key, domain, clean_email, otp_code, expired_at),
-            )
-
-        # Kirim OTP lewat Gmail SMTP sebelum commit transaksi
-        _send_otp_via_gmail(clean_email, otp_code, domain, key)
-        conn.commit()
-
-        return {
-            "success": True,
-            "status": 200,
-            "message": f"Kode OTP 6 digit telah dikirim ke {clean_email} (berlaku 10 menit).",
-        }
-    except Exception as e:
-        conn.rollback()
-        return {"success": False, "status": 500, "message": f"Gagal mengirim OTP: {e}"}
-    finally:
-        conn.close()
-
-
-def verify_otp_and_transfer_domain(cred_key: str, raw_domain: str, email: str, otp_code: str) -> dict:
-    key = (cred_key or "").strip().upper()
-    domain = normalize_domain(raw_domain)
-    clean_email = (email or "").strip().lower()
-    clean_otp = (otp_code or "").strip()
-
-    if not key or not domain or not clean_email or len(clean_otp) != 6:
-        return {"success": False, "status": 400, "message": "Data verifikasi OTP tidak lengkap."}
-
-    now_wib = datetime.now(WIB)
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            # 1. Kunci & cek OTP terakhir yang valid
-            cur.execute(
-                """
-                SELECT id, otp_code, expired_at
-                FROM domain_transfer_otps
-                WHERE credential_key = %s
-                  AND domain_name = %s
-                  AND email = %s
-                  AND is_used = FALSE
-                ORDER BY id DESC
-                LIMIT 1
-                FOR UPDATE
-                """,
-                (key, domain, clean_email),
-            )
-            otp_row = cur.fetchone()
-            if not otp_row:
-                conn.rollback()
-                return {"success": False, "status": 400, "message": "Kode OTP tidak ditemukan atau sudah digunakan."}
-
-            otp_exp = otp_row["expired_at"]
-            if otp_exp.tzinfo is None:
-                otp_exp = otp_exp.replace(tzinfo=WIB)
-            if otp_exp < now_wib:
-                conn.rollback()
-                return {"success": False, "status": 400, "message": "Kode OTP sudah kedaluwarsa. Silakan kirim ulang OTP."}
-
-            if otp_row["otp_code"] != clean_otp:
-                conn.rollback()
-                return {"success": False, "status": 400, "message": "Kode OTP salah."}
-
-            # Tandai OTP sudah terpakai
-            cur.execute("UPDATE domain_transfer_otps SET is_used = TRUE WHERE id = %s", (otp_row["id"],))
-
-            # 2. Kunci credential tujuan & cek kuota domain
-            cur.execute(
-                """
-                SELECT id, credential_key, max_domains, is_active, expired_at
-                FROM credentials
-                WHERE credential_key = %s
-                FOR UPDATE
-                """,
-                (key,),
-            )
-            cred = cur.fetchone()
-            if not cred or not cred["is_active"]:
-                conn.rollback()
-                return {"success": False, "status": 403, "message": "Credential Key tidak valid atau nonaktif."}
-
-            cur.execute(
-                "SELECT id, credential_id FROM credential_domains WHERE domain_name = %s FOR UPDATE",
-                (domain,),
-            )
-            existing_dom = cur.fetchone()
-
-            if not existing_dom or existing_dom["credential_id"] != cred["id"]:
-                cur.execute(
-                    "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
-                    (cred["id"],),
-                )
-                used_domains = int(cur.fetchone()["cnt"])
-                if used_domains >= int(cred["max_domains"]):
-                    conn.rollback()
-                    return {
-                        "success": False,
-                        "status": 403,
-                        "message": f"Kuota domain pada lisensi ini penuh ({used_domains}/{cred['max_domains']}).",
-                    }
-
-            # 3. Putuskan dari lisensi lama, simpan email terverifikasi ke credentials, dan tautkan domain
-            cur.execute("UPDATE credentials SET email = %s WHERE id = %s", (clean_email, cred["id"]))
-
-            if existing_dom:
-                cur.execute(
-                    "UPDATE credential_domains SET credential_id = %s WHERE id = %s",
-                    (cred["id"], existing_dom["id"]),
-                )
-            else:
-                cur.execute(
-                    "INSERT INTO credential_domains (credential_id, domain_name) VALUES (%s, %s)",
-                    (cred["id"], domain),
-                )
-
-        conn.commit()
-        return {
-            "success": True,
-            "status": 200,
-            "domain": domain,
-            "credential_key": cred["credential_key"],
-            "message": f"Verifikasi OTP berhasil! Domain '{domain}' kini terhubung ke lisensi Anda.",
-        }
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-        
 def transfer_domain_with_email(cred_key: str, raw_domain: str, email: str) -> dict:
     """Memutuskan domain dari lisensi lama, menyimpan email pemilik baru ke credentials, dan menautkan domain."""
     key = (cred_key or "").strip().upper()
@@ -940,32 +763,327 @@ def transfer_domain_with_email(cred_key: str, raw_domain: str, email: str) -> di
         conn.close()
 
 # =====================================================================
-#  FUNGSI VERIFIKASI
+# DOMAIN TRANSFER & OTP VERIFICATION
 # =====================================================================
-def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: str) -> dict:
-    # Gunakan timezone Asia/Jakarta untuk semua perhitungan tanggal/waktu
-    from zoneinfo import ZoneInfo
-    WIB = ZoneInfo("Asia/Jakarta")
-
+def request_domain_transfer_otp(cred_key: str, raw_domain: str, email: str) -> dict:
     key = (cred_key or "").strip().upper()
     domain = normalize_domain(raw_domain)
-    dev_id = (device_id or "").strip()
+    clean_email = (email or "").strip().lower()
 
-    if not key or not domain or not dev_id:
-        return {
-            "allowed": False,
-            "status": 400,
-            "reason": "MISSING_PARAMETERS",
-            "message": "Parameter credential_key, domain, dan device_id wajib diisi.",
-        }
+    if not key or not domain:
+        return {"success": False, "status": 400, "message": "Credential Key dan Domain wajib diisi."}
+
+    if not clean_email or not EMAIL_REGEX.match(clean_email):
+        return {"success": False, "status": 400, "message": "Alamat email tidak valid."}
 
     now_wib = datetime.now(WIB)
-    today_wib = now_wib.date().isoformat()
+    expired_at = now_wib + timedelta(minutes=10)
+    otp_code = f"{secrets.randbelow(1000000):06d}"
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # 1. Ambil detail credential_key + kunci baris (FOR UPDATE) cegah race condition
+            cur.execute(
+                """
+                SELECT id, credential_key, email, is_active, expired_at
+                FROM credentials
+                WHERE credential_key = %s
+                """,
+                (key,),
+            )
+            target_cred = cur.fetchone()
+
+            is_ok, _, err_resp = _validate_credential_record(target_cred, now_wib)
+            if not is_ok:
+                conn.rollback()
+                return {
+                    "success": False,
+                    "status": err_resp.get("status", 403),
+                    "message": err_resp.get("message", "Credential Key tujuan tidak valid."),
+                }
+
+            # Nonaktifkan OTP lama yang belum terpakai untuk kombinasi yang sama
+            cur.execute(
+                """
+                UPDATE domain_transfer_otps
+                SET is_used = TRUE
+                WHERE credential_key = %s AND domain_name = %s AND email = %s AND is_used = FALSE
+                """,
+                (key, domain, clean_email),
+            )
+
+            # Simpan OTP baru (berlaku 10 menit)
+            cur.execute(
+                """
+                INSERT INTO domain_transfer_otps (credential_key, domain_name, email, otp_code, expired_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (key, domain, clean_email, otp_code, expired_at),
+            )
+
+        # Kirim OTP lewat Gmail SMTP sebelum commit transaksi
+        _send_otp_via_gmail(clean_email, otp_code, domain, key)
+        conn.commit()
+
+        return {
+            "success": True,
+            "status": 200,
+            "message": f"Kode OTP 6 digit telah dikirim ke {clean_email} (berlaku 10 menit).",
+        }
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "status": 500, "message": f"Gagal mengirim OTP: {e}"}
+    finally:
+        conn.close()
+
+def verify_otp_and_transfer_domain(cred_key: str, raw_domain: str, email: str, otp_code: str) -> dict:
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    clean_email = (email or "").strip().lower()
+    clean_otp = (otp_code or "").strip()
+
+    if not key or not domain or not clean_email or len(clean_otp) != 6:
+        return {"success": False, "status": 400, "message": "Data verifikasi OTP tidak lengkap."}
+
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 1. Kunci & cek OTP terakhir yang valid
+            cur.execute(
+                """
+                SELECT id, otp_code, expired_at
+                FROM domain_transfer_otps
+                WHERE credential_key = %s
+                  AND domain_name = %s
+                  AND email = %s
+                  AND is_used = FALSE
+                ORDER BY id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (key, domain, clean_email),
+            )
+            otp_row = cur.fetchone()
+            if not otp_row:
+                conn.rollback()
+                return {"success": False, "status": 400, "message": "Kode OTP tidak ditemukan atau sudah digunakan."}
+
+            otp_exp = otp_row["expired_at"]
+            if otp_exp.tzinfo is None:
+                otp_exp = otp_exp.replace(tzinfo=WIB)
+            if otp_exp < now_wib:
+                conn.rollback()
+                return {"success": False, "status": 400, "message": "Kode OTP sudah kedaluwarsa. Silakan kirim ulang OTP."}
+
+            if otp_row["otp_code"] != clean_otp:
+                conn.rollback()
+                return {"success": False, "status": 400, "message": "Kode OTP salah."}
+
+            cur.execute("UPDATE domain_transfer_otps SET is_used = TRUE WHERE id = %s", (otp_row["id"],))
+
+            # 2. Kunci & validasi credential tujuan menggunakan helper tunggal
+            cur.execute(
+                """
+                SELECT id, credential_key, max_domains, is_active, expired_at
+                FROM credentials
+                WHERE credential_key = %s
+                FOR UPDATE
+                """,
+                (key,),
+            )
+            cred = cur.fetchone()
+
+            is_ok, _, err_resp = _validate_credential_record(cred, now_wib)
+            if not is_ok:
+                conn.rollback()
+                return {
+                    "success": False,
+                    "status": err_resp.get("status", 403),
+                    "message": err_resp.get("message", "Credential Key tujuan tidak valid."),
+                }
+
+            cur.execute(
+                "SELECT id, credential_id FROM credential_domains WHERE domain_name = %s FOR UPDATE",
+                (domain,),
+            )
+            existing_dom = cur.fetchone()
+
+            if not existing_dom or existing_dom["credential_id"] != cred["id"]:
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
+                    (cred["id"],),
+                )
+                used_domains = int(cur.fetchone()["cnt"])
+                if used_domains >= int(cred["max_domains"]):
+                    conn.rollback()
+                    return {
+                        "success": False,
+                        "status": 403,
+                        "message": f"Kuota domain pada lisensi ini penuh ({used_domains}/{cred['max_domains']}).",
+                    }
+
+            # 3. Putuskan dari lisensi lama, simpan email terverifikasi ke credentials, dan tautkan domain
+            cur.execute("UPDATE credentials SET email = %s WHERE id = %s", (clean_email, cred["id"]))
+
+            if existing_dom:
+                cur.execute(
+                    "UPDATE credential_domains SET credential_id = %s WHERE id = %s",
+                    (cred["id"], existing_dom["id"]),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO credential_domains (credential_id, domain_name) VALUES (%s, %s)",
+                    (cred["id"], domain),
+                )
+
+        conn.commit()
+        return {
+            "success": True,
+            "status": 200,
+            "domain": domain,
+            "credential_key": cred["credential_key"],
+            "message": f"Verifikasi OTP berhasil! Domain '{domain}' kini terhubung ke lisensi Anda.",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+# ============================================================
+# MANAJEMEN USER / DEVICE
+# ============================================================
+def get_all_users(search_query: str = "", cred_filter: str = "") -> list:
+    q = search_query.strip().lower()
+    conditions = []
+    params = []
+
+    if cred_filter:
+        conditions.append("cu.credential_id = %s")
+        params.append(int(cred_filter))
+
+    if q:
+        conditions.append("(LOWER(cu.device_id) LIKE %s OR LOWER(c.credential_key) LIKE %s)")
+        params.extend([f"%{q}%", f"%{q}%"])
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT
+            cu.id,
+            cu.credential_id,
+            cu.device_id,
+            cu.created_at,
+            c.credential_key
+        FROM credential_users cu
+        JOIN credentials c ON c.id = cu.credential_id
+        {where_clause}
+        ORDER BY cu.id DESC
+    """
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+            return [
+                {
+                    **row,
+                    "created_at": _format_ts(row["created_at"]),
+                }
+                for row in rows
+            ]
+    finally:
+        conn.close()
+
+# ============================================================
+# CREDENTIAL & LICENSE VERIFICATION
+# ============================================================
+def check_credential_status(cred_key: str) -> dict:
+    """
+    Memvalidasi apakah credential_key terdaftar, berstatus aktif,
+    dan belum melewati masa berlaku (WIB).
+    """
+    key = (cred_key or "").strip().upper()
+    if not key:
+        return {
+            "valid": False,
+            "allowed": False,
+            "status": 400,
+            "reason": "MISSING_KEY",
+            "message": "Credential Key wajib diisi.",
+        }
+
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, credential_key, tier, max_domains, max_devices, is_active, expired_at
+                FROM credentials
+                WHERE credential_key = %s
+                """,
+                (key,),
+            )
+            cred = cur.fetchone()
+
+            is_ok, expired_str, err_resp = _validate_credential_record(cred, now_wib)
+            if not is_ok:
+                return err_resp
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
+                (cred["id"],),
+            )
+            used_domains = int(cur.fetchone()["cnt"])
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM credential_users WHERE credential_id = %s",
+                (cred["id"],),
+            )
+            used_devices = int(cur.fetchone()["cnt"])
+
+        return {
+            "valid": True,
+            "allowed": True,
+            "status": 200,
+            "credential_key": cred["credential_key"],
+            "tier": cred["tier"],
+            "used_domains": used_domains,
+            "max_domains": int(cred["max_domains"]),
+            "used_devices": used_devices,
+            "max_devices": int(cred["max_devices"]),
+            "expired_at": expired_str,
+            "message": f"Credential Key valid (Paket: {str(cred['tier']).upper()}, Berlaku s/d: {expired_str}).",
+        }
+    finally:
+        conn.close()
+
+def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: str) -> dict:
+    """
+    Memvalidasi lisensi penuh (Key + Domain + Kuota PC) dan mencatat absensi harian unik WIB.
+    """
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    dev_id = (device_id or "").strip()
+    clean_city = (city or "Unknown").strip() or "Unknown"
+
+    if not key or not domain or not dev_id:
+        return {
+            "valid": False,
+            "allowed": False,
+            "status": 400,
+            "reason": "MISSING_PARAMS",
+            "message": "Credential Key, domain, dan device_id wajib diisi.",
+        }
+
+    now_wib = datetime.now(WIB)
+    today_wib = now_wib.date()
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT id, credential_key, tier, max_domains, max_devices, is_active, expired_at
@@ -977,132 +1095,92 @@ def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: 
             )
             cred = cur.fetchone()
 
-            if not cred:
+            is_ok, expired_str, err_resp = _validate_credential_record(cred, now_wib)
+            if not is_ok:
                 conn.rollback()
-                return {
-                    "allowed": False,
-                    "status": 404,
-                    "reason": "CREDENTIAL_NOT_FOUND",
-                    "message": "Credential key tidak ditemukan di server lisensi.",
-                }
+                return err_resp
 
-            if not cred["is_active"]:
-                conn.rollback()
-                return {
-                    "allowed": False,
-                    "status": 403,
-                    "reason": "CREDENTIAL_INACTIVE",
-                    "message": "Credential key berstatus nonaktif / diblokir.",
-                }
-
-            if cred["expired_at"]:
-                exp_dt = cred["expired_at"]
-                if exp_dt.tzinfo is None:
-                    exp_dt = exp_dt.replace(tzinfo=WIB)
-                if exp_dt < now_wib:
-                    conn.rollback()
-                    return {
-                        "allowed": False,
-                        "status": 403,
-                        "reason": "CREDENTIAL_EXPIRED",
-                        "message": "Masa berlaku credential key telah habis (Expired).",
-                    }
-
-            # 2. Verifikasi apakah domain sudah terdaftar pada credential_key ini
+            # 1. Validasi strict domain binding
             cur.execute(
                 """
-                SELECT id, credential_id
-                FROM credential_domains
-                WHERE domain_name = %s
+                SELECT id FROM credential_domains
+                WHERE credential_id = %s AND domain_name = %s
                 """,
-                (domain,),
+                (cred["id"], domain),
             )
-            dom_row = cur.fetchone()
-
-            if not dom_row:
+            if not cur.fetchone():
                 conn.rollback()
                 return {
+                    "valid": True,
                     "allowed": False,
                     "status": 403,
-                    "reason": "DOMAIN_NOT_REGISTERED",
-                    "message": f"Domain '{domain}' belum terdaftar pada credential key ini.",
+                    "reason": "DOMAIN_NOT_BOUND",
+                    "message": f"Domain '{domain}' belum didaftarkan pada Credential Key ini.",
                 }
 
-            if dom_row["credential_id"] != cred["id"]:
-                conn.rollback()
-                return {
-                    "allowed": False,
-                    "status": 403,
-                    "reason": "DOMAIN_MISMATCH",
-                    "message": f"Domain '{domain}' terdaftar pada credential key lain.",
-                }
+            # 2. Cek & daftarkan perangkat unik dalam batas kuota max_devices
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM credential_users WHERE credential_id = %s",
+                (cred["id"],),
+            )
+            used_devices = int(cur.fetchone()["cnt"])
 
-            # 3. Cek apakah pasangan (credential_id, device_id) sudah ada di credential_users
             cur.execute(
                 """
-                SELECT id
-                FROM credential_users
+                SELECT id FROM credential_users
                 WHERE credential_id = %s AND device_id = %s
                 """,
                 (cred["id"], dev_id),
             )
-            existing_device = cur.fetchone()
+            user_row = cur.fetchone()
 
-            cur.execute(
-                """
-                SELECT COUNT(*) AS cnt
-                FROM credential_users
-                WHERE credential_id = %s
-                """,
-                (cred["id"],),
-            )
-            used_devices = int(cur.fetchone()["cnt"])
-            max_devices = int(cred["max_devices"])
-
-            if not existing_device:
-                # Bandingkan jumlah count dengan kuota max_devices
-                if used_devices >= max_devices:
+            if not user_row:
+                if used_devices >= int(cred["max_devices"]):
                     conn.rollback()
                     return {
+                        "valid": True,
                         "allowed": False,
                         "status": 403,
                         "reason": "DEVICE_QUOTA_EXCEEDED",
-                        "message": f"Kuota perangkat penuh ({used_devices}/{max_devices} PC).",
-                        "used_devices": used_devices,
-                        "max_devices": max_devices,
+                        "message": f"Kuota perangkat penuh ({used_devices}/{cred['max_devices']} PC).",
                     }
-
                 cur.execute(
                     """
-                    INSERT INTO credential_users (credential_id, device_id)
-                    VALUES (%s, %s)
+                    INSERT INTO credential_users (credential_id, device_id, last_seen_at)
+                    VALUES (%s, %s, %s)
                     """,
-                    (cred["id"], dev_id),
+                    (cred["id"], dev_id, now_wib),
                 )
                 used_devices += 1
+            else:
+                cur.execute(
+                    "UPDATE credential_users SET last_seen_at = %s WHERE id = %s",
+                    (now_wib, user_row["id"]),
+                )
 
-            # 4. Semua lolos -> catat absen harian di daily_activity_user (1x per hari WIB)
-            clean_city = (city or "").strip() or "Unknown"
+            # 3. Catat absen harian unik WIB
             cur.execute(
                 """
-                INSERT INTO daily_activity_user (device_id, activity_date, city)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (device_id, activity_date) DO NOTHING
+                INSERT INTO daily_activity_user (credential_id, device_id, activity_date, city, recorded_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (credential_id, device_id, activity_date)
+                DO UPDATE SET city = EXCLUDED.city, recorded_at = EXCLUDED.recorded_at
                 """,
-                (dev_id, today_wib, clean_city),
+                (cred["id"], dev_id, today_wib, clean_city, now_wib),
             )
 
         conn.commit()
         return {
+            "valid": True,
             "allowed": True,
             "status": 200,
+            "credential_key": cred["credential_key"],
             "tier": cred["tier"],
             "domain": domain,
-            "device_id": dev_id,
             "used_devices": used_devices,
-            "max_devices": max_devices,
-            "activity_date": today_wib,
-            "city": clean_city,
+            "max_devices": int(cred["max_devices"]),
+            "expired_at": expired_str,
+            "message": "Lisensi valid dan aktivitas harian tercatat.",
         }
     except Exception:
         conn.rollback()
