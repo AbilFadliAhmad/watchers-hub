@@ -1147,7 +1147,7 @@ def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: 
                 cur.execute(
                     """
                     INSERT INTO credential_users (credential_id, device_id)
-                    VALUES (%s, %s, %s)
+                    VALUES (%s, %s)
                     """,
                     (cred["id"], dev_id),
                 )
