@@ -221,6 +221,7 @@ def users_page():
         cred_filter=cred_filter,
     )
 
+
 @app.route("/api/verify", methods=["POST"])
 def api_verify():
     body = request.get_json(silent=True) or {}
@@ -243,6 +244,46 @@ def api_public_telemetry():
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Cache-Control"] = "public, max-age=60"
     return response
+
+@app.route("/api/bind-domain", methods=["POST", "OPTIONS"])
+def api_bind_domain():
+    if request.method == "OPTIONS":
+        resp = jsonify({"ok": True})
+    else:
+        body = request.get_json(silent=True) or {}
+        res = data.bind_domain_to_credential(
+            cred_key=body.get("credential_key", ""),
+            raw_domain=body.get("domain", ""),
+            email=body.get("email", ""),
+        )
+        status_code = res.pop("status", 200)
+        resp = jsonify(res)
+        resp.status_code = status_code
+
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
+
+@app.route("/api/transfer-domain", methods=["POST", "OPTIONS"])
+def api_transfer_domain():
+    if request.method == "OPTIONS":
+        resp = jsonify({"ok": True})
+    else:
+        body = request.get_json(silent=True) or {}
+        res = data.transfer_domain_with_email(
+            cred_key=body.get("credential_key", ""),
+            raw_domain=body.get("domain", ""),
+            email=body.get("email", ""),
+        )
+        status_code = res.pop("status", 200)
+        resp = jsonify(res)
+        resp.status_code = status_code
+
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8003, debug=True)

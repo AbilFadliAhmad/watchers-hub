@@ -1,14 +1,17 @@
 import os
 import secrets
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+import re
 
 # Load environment variables from .env file
 load_dotenv()
 
 VALID_TIERS = {"free", "pro", "premium"}
+WIB = timezone(timedelta(hours=7))
+EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 DURATION_DAYS_MAP = {
     "1m": 30,
@@ -391,7 +394,7 @@ def get_all_users(search_query: str = "", cred_filter: str = "") -> list:
         conn.close()
 
 # =====================================================================
-# FUNGSI PEMROSESAN UNTUK API (/api/generate & /api/verify)
+# FUNGSI CRUD Credential
 # =====================================================================
 def create_credential(
     tier: str = "free",
@@ -506,11 +509,240 @@ def delete_credential(cred_id: int) -> bool:
     finally:
         conn.close()
 
-from zoneinfo import ZoneInfo
+# =====================================================================
+# FUNGSI PEMROSESAN DOMAIN
+# =====================================================================
+def bind_domain_to_credential(cred_key: str, raw_domain: str, email: str = "") -> dict:
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    clean_email = (email or "").strip().lower()
 
-WIB = ZoneInfo("Asia/Jakarta")
+    if not key or not domain:
+        return {"success": False, "status": 400, "message": "Credential Key dan Domain wajib diisi."}
 
+    if clean_email and not EMAIL_REGEX.match(clean_email):
+        return {"success": False, "status": 400, "message": "Format alamat email tidak valid."}
 
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 1. Kunci & ambil detail credential tujuan
+            cur.execute(
+                """
+                SELECT id, credential_key, tier, max_domains, is_active, expired_at, email
+                FROM credentials
+                WHERE credential_key = %s
+                FOR UPDATE
+                """,
+                (key,),
+            )
+            cred = cur.fetchone()
+            if not cred:
+                conn.rollback()
+                return {"success": False, "status": 404, "message": "Credential Key tidak ditemukan."}
+
+            if not cred["is_active"]:
+                conn.rollback()
+                return {"success": False, "status": 403, "message": "Credential Key berstatus nonaktif / diblokir."}
+
+            if cred["expired_at"]:
+                exp_dt = cred["expired_at"]
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=WIB)
+                if exp_dt < now_wib:
+                    conn.rollback()
+                    return {"success": False, "status": 403, "message": "Masa berlaku Credential Key sudah habis."}
+
+            # 2. Cek apakah domain sudah terdaftar di credential_domains
+            cur.execute(
+                """
+                SELECT cd.id, cd.credential_id, c.credential_key AS owner_key
+                FROM credential_domains cd
+                JOIN credentials c ON c.id = cd.credential_id
+                WHERE cd.domain_name = %s
+                FOR UPDATE
+                """,
+                (domain,),
+            )
+            existing_dom = cur.fetchone()
+
+            if existing_dom:
+                # Jika sudah terdaftar di credential yang sama
+                if existing_dom["credential_id"] == cred["id"]:
+                    if clean_email:
+                        cur.execute(
+                            "UPDATE credentials SET email = %s WHERE id = %s",
+                            (clean_email, cred["id"]),
+                        )
+                    conn.commit()
+                    return {
+                        "success": True,
+                        "status": 200,
+                        "already_bound": True,
+                        "domain": domain,
+                        "credential_key": cred["credential_key"],
+                        "message": f"Domain '{domain}' sudah aktif pada Credential Key ini.",
+                    }
+
+                # Jika domain sudah didaftarkan oleh orang/lisensi lain -> kirim sinyal conflict
+                conn.rollback()
+                masked_owner = existing_dom["owner_key"][:8] + "****"
+                return {
+                    "success": False,
+                    "status": 409,
+                    "conflict": True,
+                    "domain": domain,
+                    "owner_hint": masked_owner,
+                    "message": f"Domain '{domain}' sudah terikat pada lisensi lain ({masked_owner}). Apakah Anda ingin memutuskan tautan lama dan memindahkannya?",
+                }
+
+            # 3. Domain belum terdaftar -> cek kuota max_domains milik credential
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
+                (cred["id"],),
+            )
+            used_domains = int(cur.fetchone()["cnt"])
+            max_domains = int(cred["max_domains"])
+
+            if used_domains >= max_domains:
+                conn.rollback()
+                return {
+                    "success": False,
+                    "status": 403,
+                    "message": f"Kuota domain penuh ({used_domains}/{max_domains} domain).",
+                }
+
+            # 4. Simpan domain baru (dan email jika disertakan)
+            cur.execute(
+                """
+                INSERT INTO credential_domains (credential_id, domain_name)
+                VALUES (%s, %s)
+                """,
+                (cred["id"], domain),
+            )
+            if clean_email:
+                cur.execute(
+                    "UPDATE credentials SET email = %s WHERE id = %s",
+                    (clean_email, cred["id"]),
+                )
+
+        conn.commit()
+        return {
+            "success": True,
+            "status": 200,
+            "domain": domain,
+            "credential_key": cred["credential_key"],
+            "used_domains": used_domains + 1,
+            "max_domains": max_domains,
+            "message": f"Domain '{domain}' berhasil didaftarkan ke lisensi.",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def transfer_domain_with_email(cred_key: str, raw_domain: str, email: str) -> dict:
+    """Memutuskan domain dari lisensi lama, menyimpan email pemilik baru ke credentials, dan menautkan domain."""
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    clean_email = (email or "").strip().lower()
+
+    if not key or not domain:
+        return {"success": False, "status": 400, "message": "Credential Key dan Domain wajib diisi."}
+
+    if not clean_email or not EMAIL_REGEX.match(clean_email):
+        return {
+            "success": False,
+            "status": 400,
+            "message": "Masukkan alamat email yang valid untuk mengonfirmasi pemutusan domain.",
+        }
+
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 1. Validasi & kunci credential baru
+            cur.execute(
+                """
+                SELECT id, credential_key, max_domains, is_active, expired_at
+                FROM credentials
+                WHERE credential_key = %s
+                FOR UPDATE
+                """,
+                (key,),
+            )
+            cred = cur.fetchone()
+            if not cred or not cred["is_active"]:
+                conn.rollback()
+                return {"success": False, "status": 403, "message": "Credential Key tujuan tidak valid atau nonaktif."}
+
+            if cred["expired_at"]:
+                exp_dt = cred["expired_at"]
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=WIB)
+                if exp_dt < now_wib:
+                    conn.rollback()
+                    return {"success": False, "status": 403, "message": "Credential Key tujuan sudah kedaluwarsa."}
+
+            # 2. Cek kuota domain di credential baru (kecuali domain memang sudah ada di credential ini)
+            cur.execute(
+                "SELECT id, credential_id FROM credential_domains WHERE domain_name = %s FOR UPDATE",
+                (domain,),
+            )
+            existing_dom = cur.fetchone()
+
+            if not existing_dom or existing_dom["credential_id"] != cred["id"]:
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
+                    (cred["id"],),
+                )
+                used_domains = int(cur.fetchone()["cnt"])
+                if used_domains >= int(cred["max_domains"]):
+                    conn.rollback()
+                    return {
+                        "success": False,
+                        "status": 403,
+                        "message": f"Kuota domain pada lisensi baru sudah penuh ({used_domains}/{cred['max_domains']}).",
+                    }
+
+            # 3. Simpan alamat email valid ke baris credentials tujuan
+            cur.execute(
+                "UPDATE credentials SET email = %s WHERE id = %s",
+                (clean_email, cred["id"]),
+            )
+
+            # 4. Putuskan domain dari lisensi lama dan tautkan ke lisensi baru
+            if existing_dom:
+                cur.execute(
+                    "UPDATE credential_domains SET credential_id = %s WHERE id = %s",
+                    (cred["id"], existing_dom["id"]),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO credential_domains (credential_id, domain_name) VALUES (%s, %s)",
+                    (cred["id"], domain),
+                )
+
+        conn.commit()
+        return {
+            "success": True,
+            "status": 200,
+            "domain": domain,
+            "credential_key": cred["credential_key"],
+            "email": clean_email,
+            "message": f"Tautan domain lama diputus dan '{domain}' resmi terhubung ke lisensi Anda.",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+# =====================================================================
+#  FUNGSI VERIFIKASI
+# =====================================================================
 def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: str) -> dict:
     # Gunakan timezone Asia/Jakarta untuk semua perhitungan tanggal/waktu
     from zoneinfo import ZoneInfo
