@@ -109,18 +109,42 @@ def credentials_page():
     if request.method == "POST":
         action = request.form.get("action")
         if action == "create":
-            domain = request.form.get("domain", "")
-            max_devices = int(request.form.get("max_devices") or 50)
-            res = data.create_credential_for_domain(raw_domain=domain, max_devices=max_devices)
+            tier = request.form.get("tier", "free")
+            duration = request.form.get("duration", "1m")
+            max_domains = max(1, int(request.form.get("max_domains") or 1))
+            max_devices = max(1, int(request.form.get("max_devices") or 50))
+            res = data.create_credential(
+                tier=tier,
+                duration_code=duration,
+                max_domains=max_domains,
+                max_devices=max_devices,
+            )
             if res["success"]:
-                flash(f"Kredensial {res['credential_key']} berhasil dibuat untuk {res['domain']}.", "success")
+                flash(
+                    f"Kredensial {res['credential_key']} ({res['tier'].upper()}) berhasil dibuat — Masa aktif: {res['expired_at']}.",
+                    "success",
+                )
+
+        elif action == "edit":
+            cred_id = int(request.form.get("credential_id") or 0)
+            tier = request.form.get("tier", "free")
+            duration = request.form.get("duration", "keep")
+            max_domains = max(1, int(request.form.get("max_domains") or 1))
+            max_devices = max(1, int(request.form.get("max_devices") or 50))
+            if data.update_credential(cred_id, tier, duration, max_domains, max_devices):
+                flash("Data kredensial berhasil diperbarui.", "success")
             else:
-                flash(res["message"], "error")
+                flash("Gagal memperbarui kredensial.", "error")
 
         elif action == "toggle":
             cred_id = int(request.form.get("credential_id") or 0)
             if data.toggle_credential_status(cred_id):
-                flash("Status kredensial berhasil diperbarui.", "success")
+                flash("Status aktif kredensial berhasil diubah.", "success")
+
+        elif action == "delete":
+            cred_id = int(request.form.get("credential_id") or 0)
+            if data.delete_credential(cred_id):
+                flash("Kredensial beserta data domain dan perangkat terikatnya telah dihapus.", "success")
 
         return redirect(url_for("credentials_page"))
 
@@ -136,6 +160,18 @@ def credentials_page():
         q=q,
     )
 
+
+@app.route("/api/generate", methods=["POST"])
+def api_generate():
+    body = request.get_json(silent=True) or {}
+    res = data.create_credential(
+        tier=body.get("tier", "free"),
+        duration_code=body.get("duration", "1m"),
+        max_domains=int(body.get("max_domains") or 1),
+        max_devices=int(body.get("max_devices") or 50),
+    )
+    status_code = res.pop("status", 200)
+    return jsonify(res), status_code
 
 # =====================================================================
 # HALAMAN 4: CREDENTIAL DOMAINS (/domains)
@@ -178,18 +214,6 @@ def users_page():
         cred_filter=cred_filter,
     )
 
-
-# =====================================================================
-# ENDPOINT API PUBLIK (UNTUK LANDING PAGE & WATCHERS SERVER CLIENT)
-# =====================================================================
-@app.route("/api/generate", methods=["POST"])
-def api_generate():
-    body = request.get_json(silent=True) or {}
-    res = data.create_credential_for_domain(raw_domain=body.get("domain", ""))
-    status_code = res.pop("status", 200)
-    return jsonify(res), status_code
-
-
 @app.route("/api/verify", methods=["POST"])
 def api_verify():
     body = request.get_json(silent=True) or {}
@@ -207,4 +231,4 @@ def api_verify():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=8003, debug=True)

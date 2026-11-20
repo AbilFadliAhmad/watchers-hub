@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Watchers Hub{% endblock %}</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/lucide@latest"></script> 
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col">
 
@@ -49,9 +49,6 @@
 
             <!-- Akun & Logout -->
             <div class="flex items-center gap-2">
-                <span class="hidden md:inline-flex items-center px-2.5 py-1 rounded-lg bg-amber-950/50 border border-amber-500/30 text-amber-300 text-[11px] font-medium">
-                    Data Dummy
-                </span>
                 <a href="{{ url_for('logout_action') }}"
                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-950 hover:bg-rose-950/50 text-gray-400 hover:text-rose-400 border border-gray-800 hover:border-rose-500/30 text-xs font-semibold transition">
                     <i data-lucide="log-out" class="w-3.5 h-3.5"></i>

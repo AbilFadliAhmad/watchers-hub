@@ -1,9 +1,27 @@
 import os
 import secrets
-from datetime import date
+from datetime import date, datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
+VALID_TIERS = {"free", "pro", "premium"}
+
+DURATION_DAYS_MAP = {
+    "1m": 30,
+    "3m": 90,
+    "6m": 180,
+    "1y": 365,
+}
+
+def _calculate_expired_at(tier: str, duration_code: str):
+    if tier == "premium" or duration_code == "lifetime":
+        return None
+    days = DURATION_DAYS_MAP.get(duration_code, 30)
+    return datetime.now() + timedelta(days=days)
 
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
@@ -105,20 +123,23 @@ def get_all_credentials(search_query: str = "") -> list:
     if q:
         where_clause = """
             WHERE LOWER(c.credential_key) LIKE %s
+               OR LOWER(c.tier) LIKE %s
                OR EXISTS (
                    SELECT 1 FROM credential_domains cd2
                    WHERE cd2.credential_id = c.id AND LOWER(cd2.domain_name) LIKE %s
                )
         """
-        params.extend([f"%{q}%", f"%{q}%"])
+        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
 
     sql = f"""
         SELECT
             c.id,
             c.credential_key,
+            c.tier,
             c.max_domains,
             c.max_devices,
             c.is_active,
+            c.expired_at,
             c.created_at,
             COALESCE(ARRAY_AGG(DISTINCT cd.domain_name) FILTER (WHERE cd.domain_name IS NOT NULL), '{{}}') AS domains,
             COUNT(DISTINCT cu.id) AS used_devices
@@ -130,22 +151,26 @@ def get_all_credentials(search_query: str = "") -> list:
         ORDER BY c.id DESC
     """
 
+    now = datetime.now()
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(sql, tuple(params))
             rows = cur.fetchall()
-            return [
-                {
+            results = []
+            for row in rows:
+                exp_dt = row["expired_at"]
+                is_expired = bool(exp_dt and exp_dt < now)
+                results.append({
                     **row,
                     "domains": list(row["domains"] or []),
+                    "is_expired": is_expired,
+                    "expired_at_str": _format_ts(exp_dt) if exp_dt else "Selamanya",
                     "created_at": _format_ts(row["created_at"]),
-                }
-                for row in rows
-            ]
+                })
+            return results
     finally:
         conn.close()
-
 
 def toggle_credential_status(cred_id: int) -> bool:
     conn = get_db_connection()
@@ -154,6 +179,31 @@ def toggle_credential_status(cred_id: int) -> bool:
             cur.execute(
                 "UPDATE credentials SET is_active = NOT is_active WHERE id = %s RETURNING id",
                 (cred_id,),
+            )
+            updated = cur.fetchone()
+        conn.commit()
+        return updated is not None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def update_credential_limits(cred_id: int, max_domains: int, max_devices: int) -> bool:
+    if max_domains < 1 or max_devices < 1:
+        return False
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE credentials
+                SET max_domains = %s, max_devices = %s
+                WHERE id = %s
+                RETURNING id
+                """,
+                (max_domains, max_devices, cred_id),
             )
             updated = cur.fetchone()
         conn.commit()
@@ -249,49 +299,114 @@ def get_all_users(search_query: str = "", cred_filter: str = "") -> list:
 # =====================================================================
 # FUNGSI PEMROSESAN UNTUK API (/api/generate & /api/verify)
 # =====================================================================
-def create_credential_for_domain(raw_domain: str, max_domains: int = 1, max_devices: int = 50) -> dict:
-    domain = normalize_domain(raw_domain)
-    if not domain or "." not in domain:
-        return {"success": False, "status": 400, "message": "Nama domain atau IP server tidak valid."}
+def create_credential(
+    tier: str = "free",
+    duration_code: str = "1m",
+    max_domains: int = 1,
+    max_devices: int = 50,
+) -> dict:
+    clean_tier = (tier or "free").strip().lower()
+    if clean_tier not in VALID_TIERS:
+        clean_tier = "free"
+
+    expired_at = _calculate_expired_at(clean_tier, duration_code)
+    new_key = f"WCH-{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}"
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM credential_domains WHERE domain_name = %s", (domain,))
-            if cur.fetchone():
-                return {
-                    "success": False,
-                    "status": 409,
-                    "message": f"Domain '{domain}' sudah terdaftar. Satu domain hanya berhak atas 1 kredensial.",
-                }
-
-            new_key = f"WCH-{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}"
             cur.execute(
                 """
-                INSERT INTO credentials (credential_key, max_domains, max_devices, is_active)
-                VALUES (%s, %s, %s, TRUE)
+                INSERT INTO credentials (credential_key, tier, max_domains, max_devices, is_active, expired_at)
+                VALUES (%s, %s, %s, %s, TRUE, %s)
                 RETURNING id
                 """,
-                (new_key, max_domains, max_devices),
+                (new_key, clean_tier, max_domains, max_devices, expired_at),
             )
             cred_id = cur.fetchone()["id"]
-
-            cur.execute(
-                """
-                INSERT INTO credential_domains (credential_id, domain_name)
-                VALUES (%s, %s)
-                """,
-                (cred_id, domain),
-            )
-
         conn.commit()
         return {
             "success": True,
             "status": 200,
+            "id": cred_id,
             "credential_key": new_key,
-            "domain": domain,
+            "tier": clean_tier,
+            "max_domains": max_domains,
             "max_devices": max_devices,
+            "expired_at": _format_ts(expired_at) if expired_at else "Selamanya",
         }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def update_credential(
+    cred_id: int,
+    tier: str,
+    duration_code: str,
+    max_domains: int,
+    max_devices: int,
+) -> bool:
+    if max_domains < 1 or max_devices < 1:
+        return False
+
+    clean_tier = (tier or "free").strip().lower()
+    if clean_tier not in VALID_TIERS:
+        clean_tier = "free"
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            if clean_tier == "premium" or duration_code == "lifetime":
+                cur.execute(
+                    """
+                    UPDATE credentials
+                    SET tier = %s, max_domains = %s, max_devices = %s, expired_at = NULL
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (clean_tier, max_domains, max_devices, cred_id),
+                )
+            elif duration_code == "keep":
+                cur.execute(
+                    """
+                    UPDATE credentials
+                    SET tier = %s, max_domains = %s, max_devices = %s
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (clean_tier, max_domains, max_devices, cred_id),
+                )
+            else:
+                new_exp = _calculate_expired_at(clean_tier, duration_code)
+                cur.execute(
+                    """
+                    UPDATE credentials
+                    SET tier = %s, max_domains = %s, max_devices = %s, expired_at = %s
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (clean_tier, max_domains, max_devices, new_exp, cred_id),
+                )
+            updated = cur.fetchone()
+        conn.commit()
+        return updated is not None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def delete_credential(cred_id: int) -> bool:
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM credentials WHERE id = %s RETURNING id", (cred_id,))
+            deleted = cur.fetchone()
+        conn.commit()
+        return deleted is not None
     except Exception:
         conn.rollback()
         raise
@@ -300,6 +415,121 @@ def create_credential_for_domain(raw_domain: str, max_domains: int = 1, max_devi
 
 
 def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: str) -> dict:
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    dev_id = (device_id or "").strip()
+
+    if not key or not domain or not dev_id:
+        return {"allowed": False, "status": 400, "reason": "MISSING_PARAMETERS"}
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tier, max_domains, max_devices, is_active, expired_at
+                FROM credentials
+                WHERE credential_key = %s
+                FOR UPDATE
+                """,
+                (key,),
+            )
+            cred = cur.fetchone()
+            if not cred or not cred["is_active"]:
+                conn.rollback()
+                return {"allowed": False, "status": 403, "reason": "INVALID_OR_INACTIVE_CREDENTIAL"}
+
+            if cred["expired_at"] and cred["expired_at"] < datetime.now():
+                conn.rollback()
+                return {"allowed": False, "status": 403, "reason": "CREDENTIAL_EXPIRED"}
+
+            # Cek apakah domain sudah terdaftar di credential_domains
+            cur.execute(
+                "SELECT credential_id FROM credential_domains WHERE domain_name = %s",
+                (domain,),
+            )
+            dom_row = cur.fetchone()
+
+            if dom_row:
+                if dom_row["credential_id"] != cred["id"]:
+                    conn.rollback()
+                    return {"allowed": False, "status": 403, "reason": "DOMAIN_BOUND_TO_OTHER_CREDENTIAL"}
+            else:
+                # Domain baru dari client: daftarkan otomatis jika kuota max_domains masih cukup
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM credential_domains WHERE credential_id = %s",
+                    (cred["id"],),
+                )
+                bound_dom_count = cur.fetchone()["cnt"]
+                if bound_dom_count >= cred["max_domains"]:
+                    conn.rollback()
+                    return {
+                        "allowed": False,
+                        "status": 403,
+                        "reason": "DOMAIN_QUOTA_EXCEEDED",
+                        "used_domains": bound_dom_count,
+                        "max_domains": cred["max_domains"],
+                    }
+
+                cur.execute(
+                    "INSERT INTO credential_domains (credential_id, domain_name) VALUES (%s, %s)",
+                    (cred["id"], domain),
+                )
+
+            # Cek slot device_id pada credential_users
+            cur.execute(
+                "SELECT id FROM credential_users WHERE credential_id = %s AND device_id = %s",
+                (cred["id"], dev_id),
+            )
+            existing_user = cur.fetchone()
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM credential_users WHERE credential_id = %s",
+                (cred["id"],),
+            )
+            used_count = cur.fetchone()["cnt"]
+
+            if not existing_user:
+                if used_count >= cred["max_devices"]:
+                    conn.rollback()
+                    return {
+                        "allowed": False,
+                        "status": 403,
+                        "reason": "DEVICE_QUOTA_EXCEEDED",
+                        "used": used_count,
+                        "max": cred["max_devices"],
+                    }
+
+                cur.execute(
+                    "INSERT INTO credential_users (credential_id, device_id) VALUES (%s, %s)",
+                    (cred["id"], dev_id),
+                )
+                used_count += 1
+
+            today_str = date.today().isoformat()
+            cur.execute(
+                """
+                INSERT INTO daily_activity_user (device_id, activity_date, city)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (device_id, activity_date) DO NOTHING
+                """,
+                (dev_id, today_str, city or "Unknown"),
+            )
+
+        conn.commit()
+        return {
+            "allowed": True,
+            "status": 200,
+            "tier": cred["tier"],
+            "used_devices": used_count,
+            "max_devices": cred["max_devices"],
+            "city": city or "Unknown",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     key = (cred_key or "").strip().upper()
     domain = normalize_domain(raw_domain)
     dev_id = (device_id or "").strip()
