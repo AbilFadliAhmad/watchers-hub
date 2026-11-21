@@ -330,6 +330,29 @@ def api_transfer_domain():
     resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     return resp
 
+# --- Reset CREDENSIAL & Putuskan Domain dari Credensial --- 
+@app.route("/api/manage-domain-action", methods=["POST", "OPTIONS"])
+def api_manage_domain_action():
+    """Endpoint eksekusi Reset Perangkat atau Hapus Tautan Domain dengan verifikasi OTP Email."""
+    if request.method == "OPTIONS":
+        resp = jsonify({"ok": True})
+    else:
+        body = request.get_json(silent=True) or {}
+        res = data.execute_credential_domain_action(
+            cred_key=body.get("credential_key", ""),
+            raw_domain=body.get("domain", ""),
+            email=body.get("email", ""),
+            otp_code=body.get("otp_code", ""),
+            action=body.get("action", ""),
+        )
+        status_code = res.pop("status", 200)
+        resp = jsonify(res)
+        resp.status_code = status_code
+
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
 
 # =============================================================================
 # CHECK EXISTS DOMAIN

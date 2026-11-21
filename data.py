@@ -1293,3 +1293,121 @@ def verify_and_log_device(cred_key: str, raw_domain: str, device_id: str, city: 
         raise
     finally:
         conn.close()
+
+# Reset MAX device & Putuskan Domain
+def execute_credential_domain_action(
+    cred_key: str,
+    raw_domain: str,
+    email: str,
+    otp_code: str,
+    action: str,  # "reset_devices" atau "unbind_domain"
+) -> dict:
+    """
+    Memverifikasi OTP 6 digit dari email lalu menjalankan aksi manajemen lisensi:
+    - 'reset_devices': Menghapus semua device_id di credential_users untuk credential_id ini.
+    - 'unbind_domain': Memutuskan tautan domain ini dari credential_domains (sekaligus reset devices).
+    """
+    key = (cred_key or "").strip().upper()
+    domain = normalize_domain(raw_domain)
+    clean_email = (email or "").strip().lower()
+    clean_otp = (otp_code or "").strip()
+
+    if action not in ("reset_devices", "unbind_domain"):
+        return {"success": False, "status": 400, "message": "Aksi tidak dikenali."}
+    if not key or not domain or not clean_email or not clean_otp:
+        return {"success": False, "status": 400, "message": "Data verifikasi OTP tidak lengkap."}
+
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 1. Pastikan domain memang tertaut pada credential_key tersebut
+            cur.execute(
+                """
+                SELECT c.id, c.credential_key
+                FROM credential_domains cd
+                JOIN credentials c ON c.id = cd.credential_id
+                WHERE c.credential_key = %s AND cd.domain_name = %s
+                LIMIT 1
+                """,
+                (key, domain),
+            )
+            cred = cur.fetchone()
+            if not cred:
+                return {
+                    "success": False,
+                    "status": 404,
+                    "message": "Kredensial dan domain tidak ditemukan atau sudah tidak tertaut.",
+                }
+
+            # 2. Verifikasi OTP 6 digit yang belum terpakai & belum kedaluwarsa
+            cur.execute(
+                """
+                SELECT id, otp_code, expires_at
+                FROM domain_transfer_otps
+                WHERE credential_key = %s
+                  AND domain_name = %s
+                  AND email = %s
+                  AND used = FALSE
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (key, domain, clean_email),
+            )
+            otp_row = cur.fetchone()
+            if not otp_row:
+                return {
+                    "success": False,
+                    "status": 400,
+                    "message": "Kode OTP tidak ditemukan atau sudah digunakan.",
+                }
+
+            expires_at = otp_row["expires_at"]
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=WIB)
+
+            if now_wib > expires_at:
+                return {
+                    "success": False,
+                    "status": 400,
+                    "message": "Kode OTP sudah kedaluwarsa (melebihi 10 menit).",
+                }
+
+            if otp_row["otp_code"] != clean_otp:
+                return {
+                    "success": False,
+                    "status": 400,
+                    "message": "Kode OTP tidak cocok.",
+                }
+
+            # 3. Tandai OTP telah terpakai
+            cur.execute(
+                "UPDATE domain_transfer_otps SET used = TRUE WHERE id = %s",
+                (otp_row["id"],),
+            )
+
+            # 4. Jalankan aksi sesuai pilihan admin
+            if action == "reset_devices":
+                cur.execute(
+                    "DELETE FROM credential_users WHERE credential_id = %s",
+                    (cred["id"],),
+                )
+                msg = f"Seluruh perangkat terdaftar pada {key} berhasil direset."
+            else:
+                cur.execute(
+                    "DELETE FROM credential_users WHERE credential_id = %s",
+                    (cred["id"],),
+                )
+                cur.execute(
+                    "DELETE FROM credential_domains WHERE credential_id = %s AND domain_name = %s",
+                    (cred["id"], domain),
+                )
+                msg = f"Tautan domain {domain} dari {key} berhasil dihapus."
+
+        conn.commit()
+        return {"success": True, "status": 200, "action": action, "message": msg}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "status": 500, "message": f"Gagal memproses aksi: {e}"}
+    finally:
+        conn.close()
