@@ -243,7 +243,7 @@ def users_page():
 @app.route("/api/verify", methods=["POST"])
 def api_verify():
     body = request.get_json(silent=True) or {}
-    print('bodybang: ', body)
+    app.logger.info("bodybang: %s", body)
     raw_city = body.get("city") or request.headers.get("x-vercel-ip-city") or "Unknown"
     city_name = unquote(raw_city)
 
