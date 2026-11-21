@@ -245,7 +245,7 @@ def api_verify():
     body = request.get_json(silent=True) or {}
     app.logger.info("bodybang: %s", body)
     app.logger.info("bodycity: %s", body.get('city'))
-    raw_city = body.get("city") or "Unknown"
+    raw_city = body.get("city")
     app.logger.info("rawCItY: ", raw_city)
     city_name = unquote(raw_city)
     app.logger.info("city_name: ", city_name)
