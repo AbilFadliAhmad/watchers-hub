@@ -762,6 +762,117 @@ def transfer_domain_with_email(cred_key: str, raw_domain: str, email: str) -> di
     finally:
         conn.close()
 
+# Check Ketersediaan domain
+def check_domain_status(raw_domain: str) -> dict:
+    """
+    Endpoint publik ringan: hanya mengecek apakah domain sudah terdaftar
+    pada credential aktif (tanpa mengekspos credential_key maupun device_id).
+    """
+    domain = normalize_domain(raw_domain)
+    if not domain:
+        return {
+            "bound": False,
+            "status": 400,
+            "message": "Parameter domain wajib diisi.",
+        }
+
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id, c.is_active, c.expired_at
+                FROM credential_domains cd
+                JOIN credentials c ON c.id = cd.credential_id
+                WHERE cd.domain_name = %s
+                LIMIT 1
+                """,
+                (domain,),
+            )
+            cred = cur.fetchone()
+
+            is_ok, _, _ = _validate_credential_record(cred, now_wib)
+            if not is_ok:
+                return {
+                    "bound": False,
+                    "status": 200,
+                    "domain": domain,
+                }
+
+        return {
+            "bound": True,
+            "status": 200,
+            "domain": domain,
+        }
+    finally:
+        conn.close()
+
+# Check ketersediaan domain dan kembalikan device_id yang terhubung dengan domain tersebut
+def get_domain_device_ids(raw_domain: str) -> dict:
+    """
+    Endpoint khusus server: mengambil daftar device_id dari credential_users
+    yang terhubung pada domain terdaftar.
+    """
+    domain = normalize_domain(raw_domain)
+    if not domain:
+        return {
+            "bound": False,
+            "status": 400,
+            "message": "Parameter domain wajib diisi.",
+            "device_ids": [],
+        }
+
+    now_wib = datetime.now(WIB)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id, c.credential_key, c.tier, c.max_devices, c.is_active, c.expired_at
+                FROM credential_domains cd
+                JOIN credentials c ON c.id = cd.credential_id
+                WHERE cd.domain_name = %s
+                LIMIT 1
+                """,
+                (domain,),
+            )
+            cred = cur.fetchone()
+
+            is_ok, expired_str, err_resp = _validate_credential_record(cred, now_wib)
+            if not is_ok:
+                return {
+                    "bound": False,
+                    "status": 200,
+                    "domain": domain,
+                    "message": err_resp.get("message", "Domain belum terdaftar pada lisensi aktif."),
+                    "device_ids": [],
+                }
+
+            cur.execute(
+                """
+                SELECT device_id
+                FROM credential_users
+                WHERE credential_id = %s
+                ORDER BY id ASC
+                """,
+                (cred["id"],),
+            )
+            device_ids = [row["device_id"] for row in cur.fetchall() if row.get("device_id")]
+
+        return {
+            "bound": True,
+            "status": 200,
+            "domain": domain,
+            "credential_key": cred["credential_key"],
+            "tier": cred["tier"],
+            "max_devices": int(cred["max_devices"]),
+            "expired_at": expired_str,
+            "device_ids": device_ids,
+        }
+    finally:
+        conn.close()
+
 # =====================================================================
 # DOMAIN TRANSFER & OTP VERIFICATION
 # =====================================================================

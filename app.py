@@ -330,5 +330,40 @@ def api_transfer_domain():
     resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     return resp
 
+
+# =============================================================================
+# CHECK EXISTS DOMAIN
+# =============================================================================
+@app.route("/api/check-domain", methods=["POST", "OPTIONS"])
+def api_check_domain():
+    """API publik untuk guard localStorage di browser (hanya return bound: true/false)."""
+    if request.method == "OPTIONS":
+        resp = jsonify({"ok": True})
+    else:
+        body = request.get_json(silent=True) or {}
+        res = data.check_domain_status(raw_domain=body.get("domain", ""))
+        status_code = res.pop("status", 200)
+        resp = jsonify(res)
+        resp.status_code = status_code
+
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
+
+@app.route("/api/domain-devices", methods=["POST"])
+def api_domain_devices():
+    """API khusus server-to-server untuk mengambil daftar device_id."""
+    expected_secret = os.environ.get("HUB_INTERNAL_SECRET", "").strip()
+    if expected_secret:
+        provided_secret = request.headers.get("X-Hub-Internal-Secret", "").strip()
+        if provided_secret != expected_secret:
+            return jsonify({"bound": False, "message": "Unauthorized internal access.", "device_ids": []}), 401
+
+    body = request.get_json(silent=True) or {}
+    res = data.get_domain_device_ids(raw_domain=body.get("domain", ""))
+    status_code = res.pop("status", 200)
+    return jsonify(res), status_code
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
