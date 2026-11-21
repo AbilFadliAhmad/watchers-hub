@@ -245,9 +245,10 @@ def api_verify():
     body = request.get_json(silent=True) or {}
     app.logger.info("bodybang: %s", body)
     app.logger.info("bodycity: %s", body.get('city'))
-    raw_city = body.get("city") or request.headers.get("x-vercel-ip-city") or "Unknown"
+    raw_city = body.get("city") or "Unknown"
     app.logger.info("rawCItY: ", raw_city)
     city_name = unquote(raw_city)
+    app.logger.info("city_name: ", city_name)
 
     res = data.verify_and_log_device(
         cred_key=body.get("credential_key", ""),
