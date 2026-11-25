@@ -34,29 +34,283 @@ def get_db_connection():
     return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
 
 # --- Email & OTP Delivery ---
-def _send_otp_via_gmail(to_email: str, otp_code: str, domain: str, cred_key: str) -> None:
-    smtp_user = os.environ.get("GMAIL_SMTP_USER", "").strip()
-    smtp_pass = os.environ.get("GMAIL_SMTP_APP_PASSWORD", "").strip()
+import html
+import json
+import os
+import urllib.error
+import urllib.request
+from datetime import datetime
 
-    if not smtp_user or not smtp_pass:
-        raise RuntimeError("Konfigurasi GMAIL_SMTP_USER / GMAIL_SMTP_APP_PASSWORD belum diatur di server.")
 
-    msg = EmailMessage()
-    msg["Subject"] = f"[Watchers Hub] Kode OTP Pemutusan Domain: {otp_code}"
-    msg["From"] = f"Watchers Hub Security <{smtp_user}>"
-    msg["To"] = to_email
-    msg.set_content(
-        f"Halo,\n\n"
-        f"Anda meminta pemutusan tautan lama dan pemindahan domain '{domain}' ke Credential Key {cred_key}.\n\n"
-        f"Kode Verifikasi OTP Anda: {otp_code}\n"
-        f"Kode ini berlaku selama 10 menit dan hanya dapat digunakan satu kali.\n\n"
-        f"Jika Anda tidak merasa melakukan permintaan ini, abaikan email ini.\n"
-        f"— Watchers Hub"
+# --- Send Credential And OTP with Gmail (Resend) ---
+def _build_watchers_email_html(
+    email_type: str,
+    domain: str,
+    cred_key: str,
+    otp_code: str = "",
+    max_devices: int | None = None,
+    max_domains: int | None = None,
+    expires_at: str | None = None,
+) -> tuple[str, str, str]:
+    """Menyusun (subject, html_body, plain_text_fallback) berdesain profesional
+    untuk tipe 'otp' maupun 'credential'.
+    """
+    safe_domain = html.escape(domain or "-")
+    safe_cred = html.escape(cred_key or "-")
+    safe_otp = html.escape(otp_code or "")
+    current_year = datetime.now().year
+
+    if email_type == "otp":
+        subject = f"[Watchers Hub] Kode Verifikasi OTP: {otp_code}"
+        badge_text = "VERIFIKASI KEAMANAN DOMAIN"
+        badge_bg = "#fef3c7"
+        badge_color = "#92400e"
+        heading = "Konfirmasi Pemutusan & Pemindahan Domain"
+        intro = (
+            f"Kami menerima permintaan untuk memutus tautan lama dan memindahkan domain "
+            f"<strong style='color:#0f172a;'>{safe_domain}</strong> ke Credential Key berikut:"
+        )
+        highlight_box = f"""
+            <div style="margin:24px 0;padding:20px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;text-align:center;">
+                <div style="font-size:11px;font-weight:700;letter-spacing:1.2px;color:#64748b;text-transform:uppercase;margin-bottom:8px;">
+                    Kode Verifikasi OTP Anda
+                </div>
+                <div style="font-family:'Courier New',Courier,monospace;font-size:32px;font-weight:800;letter-spacing:8px;color:#0284c7;">
+                    {safe_otp}
+                </div>
+                <div style="font-size:12px;color:#ef4444;font-weight:600;margin-top:10px;">
+                    Berlaku selama 10 menit &bull; Hanya untuk 1 kali penggunaan
+                </div>
+            </div>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f1f5f9;border-radius:10px;padding:14px;font-size:13px;color:#334155;">
+                <tr>
+                    <td style="padding:4px 0;color:#64748b;width:140px;">Domain Target</td>
+                    <td style="padding:4px 0;font-weight:700;color:#0f172a;">{safe_domain}</td>
+                </tr>
+                <tr>
+                    <td style="padding:4px 0;color:#64748b;">Credential Key</td>
+                    <td style="padding:4px 0;font-family:'Courier New',Courier,monospace;font-weight:700;color:#0f172a;">{safe_cred}</td>
+                </tr>
+            </table>
+        """
+        footer_note = (
+            "Jika Anda tidak merasa mengajukan pemindahan domain ini, segera abaikan email ini. "
+            "Jangan pernah membagikan kode OTP kepada siapa pun."
+        )
+        plain_text = (
+            f"Halo,\n\n"
+            f"Anda meminta pemutusan tautan lama dan pemindahan domain '{domain}' ke Credential Key {cred_key}.\n\n"
+            f"Kode Verifikasi OTP Anda: {otp_code}\n"
+            f"Kode ini berlaku selama 10 menit dan hanya dapat digunakan satu kali.\n\n"
+            f"Jika Anda tidak merasa melakukan permintaan ini, abaikan email ini.\n"
+            f"— Watchers Hub Security"
+        )
+
+    elif email_type == "credential":
+        subject = f"[Watchers Hub] Credential Key Lisensi Aktif — {domain or 'Watchers Lab'}"
+        badge_text = "LISENSI & CREDENTIAL KEY"
+        badge_bg = "#dcfce7"
+        badge_color = "#166534"
+        heading = "Credential Key Watchers Anda Siap Digunakan"
+        intro = (
+            "Terima kasih telah menggunakan <strong>Watchers</strong>. Berikut adalah "
+            "<strong>Credential Key</strong> resmi untuk mengaktifkan dan menghubungkan "
+            "server dashboard serta agen PC lab Anda:"
+        )
+
+        quota_row = ""
+        if max_devices is not None:
+            quota_row = f"""
+                <tr>
+                    <td style="padding:6px 0;color:#64748b;">Kuota Perangkat</td>
+                    <td style="padding:6px 0;font-weight:700;color:#0f172a;">Maksimal {int(max_devices)} PC Client</td>
+                </tr>
+            """
+
+        expiry_row = ""
+        if expires_at:
+            expiry_row = f"""
+                <tr>
+                    <td style="padding:6px 0;color:#64748b;">Masa Berlaku</td>
+                    <td style="padding:6px 0;font-weight:700;color:#0f172a;">{html.escape(expires_at)}</td>
+                </tr>
+            """
+
+        max_domains_row = ""
+        if max_domain:
+            max_domains_row = f"""
+                <tr>
+                    <td style="padding:6px 0;color:#64748b;">Kuota Domain</td>
+                    <td style="padding:6px 0;font-weight:700;color:#0f172a;">Maksimal {int(max_domains)} Domain</td>
+                </tr>
+            """
+
+        highlight_box = f"""
+            <div style="margin:24px 0;padding:20px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;text-align:center;">
+                <div style="font-size:11px;font-weight:700;letter-spacing:1.2px;color:#15803d;text-transform:uppercase;margin-bottom:8px;">
+                    Credential Key Lisensi Anda
+                </div>
+                <div style="font-family:'Courier New',Courier,monospace;font-size:20px;font-weight:800;letter-spacing:1.5px;color:#0f172a;word-break:break-all;background:#ffffff;padding:12px 16px;border-radius:8px;border:1px dashed #86efac;">
+                    {safe_cred}
+                </div>
+            </div>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;font-size:13px;color:#334155;">
+                {max_domains_row}
+                {quota_row}
+                {expiry_row}
+                <tr>
+                    <td style="padding:6px 0;color:#64748b;width:140px;">Status Lisensi</td>
+                    <td style="padding:6px 0;font-weight:700;color:#16a34a;">Aktif & Siap Tautkan</td>
+                </tr>
+            </table>
+            <div style="margin-top:20px;padding:14px 16px;background-color:#eff6ff;border-left:4px solid #0284c7;border-radius:6px;font-size:12.5px;color:#1e3a8a;line-height:1.6;">
+                <strong>Langkah Aktivasi Singkat:</strong><br>
+                1. Buka halaman <code>/license</code> pada dashboard server Watchers Anda.<br>
+                2. Masukkan <strong>Credential Key</strong> di atas untuk menautkan domain server.<br>
+                3. Konfigurasikan kunci yang sama pada aplikasi <code>WatchersAgent</code> di PC siswa.
+            </div>
+        """
+        footer_note = (
+            "Simpan Credential Key ini di tempat yang aman. Satu Credential Key hanya dapat ditautkan "
+            "ke satu domain server aktif pada waktu bersamaan."
+        )
+        plain_text = (
+            f"Halo,\n\n"
+            f"Berikut adalah Credential Key lisensi Watchers Anda:\n"
+            f"Credential Key: {cred_key}\n"
+            f"{f'Kuota Domain: {max_domains} Domain' + chr(10) if max_domains is not None else ''}"
+            f"{f'Kuota Perangkat: {max_devices} PC' + chr(10) if max_devices is not None else ''}"
+            f"{f'Masa Berlaku: {expires_at}' + chr(10) if expires_at else ''}\n"
+            f"Langkah Aktivasi:\n"
+            f"1. Buka halaman /license pada dashboard server Watchers Anda.\n"
+            f"2. Masukkan Credential Key di atas untuk menautkan domain.\n"
+            f"3. Masukkan kunci yang sama pada WatchersAgent di PC siswa.\n\n"
+            f"— Watchers Hub"
+        )
+    else:
+        raise ValueError(f"Tipe email tidak didukung: {email_type}")
+
+    html_body = f"""<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{html.escape(subject)}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0f172a;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 20px 25px -5px rgba(0,0,0,0.3);">
+          <!-- Header Brand -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#020617 0%,#0f172a 100%);padding:24px 32px;border-bottom:1px solid #1e293b;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td>
+                    <span style="font-size:18px;font-weight:800;color:#38bdf8;letter-spacing:-0.3px;">Watchers</span>
+                    <span style="font-size:18px;font-weight:400;color:#f8fafc;">Hub</span>
+                  </td>
+                  <td align="right">
+                    <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:0.6px;background-color:{badge_bg};color:{badge_color};">
+                      {badge_text}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Main Content -->
+          <tr>
+            <td style="padding:32px;">
+              <h1 style="margin:0 0 12px 0;font-size:20px;font-weight:700;color:#0f172a;line-height:1.3;">
+                {heading}
+              </h1>
+              <p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">
+                Halo,<br><br>{intro}
+              </p>
+
+              {highlight_box}
+
+              <p style="margin:24px 0 0 0;font-size:12.5px;color:#64748b;line-height:1.6;">
+                {footer_note}
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color:#f8fafc;padding:20px 32px;border-top:1px solid #e2e8f0;text-align:center;">
+              <p style="margin:0;font-size:11.5px;color:#94a3b8;">
+                &copy; {current_year} Watchers Hub &bull; Sistem Manajemen &amp; Lisensi Lab Komputer
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    return subject, html_body, plain_text
+def _send_watchers_email(
+    to_email: str,
+    email_type: str,
+    cred_key: str,
+    domain: str = "",
+    otp_code: str = "",
+    max_devices: int | None = None,
+    max_domains: int | None = None,
+    expires_at: str | None = None,
+) -> dict:
+    """Mengirimkan email HTML transaksional ('otp' atau 'credential') melalui Resend API."""
+    api_key = os.environ.get("RESEND_API_KEY", "").strip()
+    from_email = os.environ.get("RESEND_FROM_EMAIL", "").strip()
+    from_name = os.environ.get("RESEND_FROM_NAME", "Watchers Hub").strip()
+
+    if not api_key or not from_email:
+        raise RuntimeError("Konfigurasi RESEND_API_KEY atau RESEND_FROM_EMAIL belum diatur di environment.")
+
+    subject, html_body, plain_text = _build_watchers_email_html(
+        email_type=email_type,
+        domain=domain,
+        cred_key=cred_key,
+        otp_code=otp_code,
+        max_devices=max_devices,
+        max_domains = max_domains,
+        expires_at=expires_at,
     )
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as smtp:
-        smtp.login(smtp_user, smtp_pass)
-        smtp.send_message(msg)
+    payload = {
+        "from": f"{from_name} <{from_email}>",
+        "to": [to_email.strip()],
+        "subject": subject,
+        "html": html_body,
+        "text": plain_text,
+    }
+
+    req = urllib.request.Request(
+        url="https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "WatchersHub/1.0",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp_body = resp.read().decode("utf-8")
+            return json.loads(resp_body) if resp_body else {"ok": True}
+    except urllib.error.HTTPError as e:
+        err_detail = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Resend API gagal ({e.code}): {err_detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Gagal terhubung ke Resend API: {e.reason}") from e
 
 # --- Credential Validation & Expiration ---
 def _validate_credential_record(
@@ -107,6 +361,7 @@ def _validate_credential_record(
         expired_str = "Selamanya"
 
     return True, expired_str, {}
+
 def _calculate_expired_at(tier: str, duration_code: str):
     if tier == "premium" or duration_code == "lifetime":
         return None
@@ -387,6 +642,7 @@ def create_credential(
         clean_tier = "free"
 
     expired_at = _calculate_expired_at(clean_tier, duration_code)
+    formatted_expired_at = _format_ts(expired_at) if expired_at else "Selamanya"
     new_key = f"WCH-{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}"
 
     conn = get_db_connection()
@@ -402,6 +658,22 @@ def create_credential(
             )
             cred_id = cur.fetchone()["id"]  # type: ignore
         conn.commit()
+
+        email_sent = True
+        email_error = None
+        try:
+            _send_watchers_email(
+                to_email=clean_email,
+                email_type="credential",
+                cred_key=new_key,
+                max_devices=max_devices,
+                max_domains=max_domains,
+                expires_at=formatted_expired_at,
+            )
+        except Exception as mail_exc:
+            email_sent = False
+            email_error = str(mail_exc)
+
         return {
             "success": True,
             "status": 200,
@@ -411,13 +683,16 @@ def create_credential(
             "tier": clean_tier,
             "max_domains": max_domains,
             "max_devices": max_devices,
-            "expired_at": _format_ts(expired_at) if expired_at else "Selamanya",
+            "expired_at": formatted_expired_at,
+            "email_sent": email_sent,
+            "email_error": email_error,
         }
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
 def update_credential(
     cred_id: int,
     email: str,
@@ -900,7 +1175,13 @@ def request_domain_transfer_otp(cred_key: str, raw_domain: str, email: str) -> d
             )
 
         # Kirim OTP lewat Gmail SMTP sebelum commit transaksi
-        _send_otp_via_gmail(clean_email, otp_code, domain, key)
+        _send_watchers_email(
+            to_email=clean_email,
+            email_type="otp",
+            cred_key=key,
+            domain=domain,
+            otp_code=otp_code,
+        )
         conn.commit()
 
         return {
