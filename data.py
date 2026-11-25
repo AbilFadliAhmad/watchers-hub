@@ -253,7 +253,7 @@ def get_public_telemetry_14d() -> dict:
                 "date": short_label,
                 "full_date": "Hari Ini" if curr_day == today else f"{curr_day.day} {month_names[curr_day.month]} {curr_day.year}",
                 "total_devices": total_dev,
-                "regions": raw_regions[:3],
+                "regions": raw_regions,
             })
 
         return {
@@ -262,7 +262,7 @@ def get_public_telemetry_14d() -> dict:
         }
     finally:
         conn.close()
-        
+
 # ============================================================
 # MANAJEMEN CREDENTIAL
 # ============================================================
