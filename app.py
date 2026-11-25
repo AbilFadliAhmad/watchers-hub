@@ -261,7 +261,7 @@ def api_public_telemetry():
     payload = data.get_public_telemetry_14d()
     response = jsonify(payload)
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Cache-Control"] = "public, max-age=60"
+    response.headers["Cache-Control"] = "public, max-age=300"
     return response
 
 # =============================================================================
